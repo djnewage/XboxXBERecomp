@@ -5,6 +5,10 @@ get_filename_component(XBE_SDK_DIR ${CMAKE_CURRENT_LIST_DIR}/.. ABSOLUTE)
 # build scripts find the SDK's xdk folder and THIRD_PARTY.txt through this
 file(TO_NATIVE_PATH "${XBE_SDK_DIR}" XBE_SDK_DIR_NATIVE)
 file(WRITE ${CMAKE_BINARY_DIR}/sdk_dir.txt "${XBE_SDK_DIR_NATIVE}\n")
+# the OpenXR loader beside the executables (runtime/vr/vr.cpp loads it when the vr setting is on)
+if(WIN32)
+    configure_file(${XBE_SDK_DIR}/thirdparty/openxr/bin/x64/openxr_loader.dll ${CMAKE_BINARY_DIR}/openxr_loader.dll COPYONLY)
+endif()
 
 include(FetchContent)
 set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)

@@ -22,6 +22,7 @@
 #include <imgui.h>
 #include <backends/imgui_impl_win32.h>
 
+#include "vr/vr.h"
 #include "app/app.h"
 #include "core/diag.h"
 #include "core/input.h"
@@ -329,7 +330,7 @@ void Pace(uint32_t vblanks) {
         LOGR("resumed");
         next = clock::now();
     }
-    uint32_t cap = PaceRate(Get().fps_cap, vblanks);
+    uint32_t cap = vr::Running() ? 0 : PaceRate(Get().fps_cap, vblanks);  // a headset paces the frames itself (vr/vr.h)
     auto now = clock::now();
     if (!cap) {
         next = now;

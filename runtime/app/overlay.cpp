@@ -446,6 +446,7 @@ void Graphics(Settings& s) {
         Save();
     }
     if (RowCheck("Low latency", &s.low_latency, "Applies at the next start. Holds one finished frame instead of several: less input lag, but a slow frame costs more.")) Save();
+    if (RowCheck("VR headset", &s.vr, "Applies at the next start. Shows the game in a headset through OpenXR (SteamVR), with Direct3D 12. Start SteamVR first.")) Save();
     if (RowCheck("Show frames a second", &s.show_fps)) Save();
     if (kGame.sharpen_2d && RowCheck("Sharp text and HUD", &s.sharp_2d)) Save();
     int renderer = int(s.renderer % 2);

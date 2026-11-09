@@ -33,6 +33,7 @@
 #include "app/app.h"
 #include "core/diag.h"
 #include "core/log.h"
+#include "vr/vr.h"
 #include "gpu/backend.h"
 #include "gpu/d3d_common.h"
 #include "gpu/ext.h"
@@ -680,6 +681,7 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
                         ui_heap_->GetCPUDescriptorHandleForHeapStart(), ui_heap_->GetGPUDescriptorHandleForHeapStart());
     LoadSettings();
     Begin();
+    vr::Start(dev_.Get(), queue_.Get());
     LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f", width, height, bb_w_, bb_h_, scale_);
     return true;
 }
@@ -2473,6 +2475,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     }
     PerfScope perf_draw{g_perf.draw};
     g_perf.draws++;
+    vr::NoteDraw(s, count);
     if (cap_) CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
     // XBE_CAPTURE_DRAWS=vs:...: the target once before the first draw with that shader, before this draw binds anything
     if (cap_ && !cap_vs_before_ && diag::CaptureDraws().vs && s.vs_handle == diag::CaptureDraws().vs) {
@@ -3019,6 +3022,8 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
         frame = t->res.Get();
         frame_fmt = t->fmt;
         if (app::Get().smaa && SmaaFrame(*t)) frame = smaa_[2].res.Get(), frame_fmt = kBgra;
+        // the headset gets the frame as the title drew it, before the window's scaling and the interface
+        vr::Frame(*this, frame, int(frame_fmt), t->w, t->h);
     }
     D3D12_RESOURCE_STATES bs = D3D12_RESOURCE_STATE_PRESENT;
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -3155,11 +3160,13 @@ void D3D12Backend::Present(const Surface& front) {
     DrawFrame(t, bi);
     Submit(false);
     DeliverReports();
-    bool vsync = app::Get().vsync;
+    vr::Submit();
+    bool vsync = app::Get().vsync && !vr::Running();  // the headset paces the frames then, not the window
     auto perf_swap = PerfNow();
     swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
     g_perf.swap += PerfMs(perf_swap);
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
+    vr::Next();
 
     presents_++;
     presents_seen_.store(presents_);

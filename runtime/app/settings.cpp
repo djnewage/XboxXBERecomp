@@ -226,6 +226,7 @@ void Load() {
     s.alpha_coverage = t["alpha_coverage"].value_or(s.alpha_coverage);
     s.world_textures = t["world_textures"].value_or(s.world_textures);
     s.low_latency = t["low_latency"].value_or(s.low_latency);
+    s.vr = t["vr"].value_or(s.vr);
     s.sharpen = std::min<uint32_t>(t["sharpen"].value_or(s.sharpen), 100);
     std::string renderer = t["renderer"].value_or(std::string(kRenderers[s.renderer % kRendererCount]));
     for (uint32_t i = 0; i < kRendererCount; i++)
@@ -320,6 +321,7 @@ toml::table Table() {
                   {"alpha_coverage", s.alpha_coverage},
                   {"world_textures", s.world_textures},
                   {"low_latency", s.low_latency},
+                  {"vr", s.vr},
                   {"sharpen", int64_t(s.sharpen)},
                   {"renderer", kRenderers[s.renderer % kRendererCount]},
                   {"wheel_range", int64_t(s.wheel_range)},

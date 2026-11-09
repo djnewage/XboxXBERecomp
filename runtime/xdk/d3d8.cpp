@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "vr/vr.h"
 #include "app/app.h"
 #include "core/achievements.h"
 #include "core/diag.h"
@@ -972,6 +973,7 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
         }
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
+    vr::TitlePresented();
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
     achievements::Frame();
     app::Pace(PresentVblanks());
