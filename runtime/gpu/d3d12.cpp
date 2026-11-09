@@ -230,6 +230,12 @@ public:
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override;
     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override;
     void Present(const Surface& front) override;
+    // Clear, Draw and Copy for the eye g_eye (the three above run them once, or once an eye in a headset)
+    void ClearEye(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil);
+    void DrawEye(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices);
+    void CopyEye(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points);
+    void SetEye(int eye);
+    Target* right_front_ = nullptr;  // the right eye's finished frame, for DrawFrame
     void Sync(uint32_t data, uint32_t size) override;
     void SyncLate(uint32_t data) override;
     bool DeliverLate(uint32_t data) override;
@@ -1002,7 +1008,10 @@ bool D3D12Backend::CreateTargetView(Target& t) {
 }
 
 // targets_ key of a surface's colour or depth target
-uint64_t TargetMapKey(uint32_t data, bool depth) { return uint64_t(data) << 1 | (depth ? 1 : 0); }
+// A headset (vr/vr.h): everything is drawn twice, an eye each into targets of its own. g_eye is the one being drawn,
+// 0 at any other time: a target's key holds it, so every lookup (a draw's, a clear's, a copy's, a texture's) finds that eye's
+int g_eye = 0;
+uint64_t TargetMapKey(uint32_t data, bool depth) { return uint64_t(data) << 1 | (depth ? 1 : 0) | uint64_t(g_eye) << 33; }
 
 // a smaller depth surface's console size, above the address bits
 constexpr int kKeyWidthShift = 34;
@@ -1027,6 +1036,12 @@ D3D12Backend::TargetSlot D3D12Backend::FindTargetSlot(const Surface& s, bool dep
     slot.it = targets_.find(slot.key);
     slot.sized = slot.it != targets_.end() && slot.it->second.gw == slot.gw && slot.it->second.gh == slot.gh;
     return slot;
+}
+
+void D3D12Backend::SetEye(int eye) {
+    if (g_eye == eye) return;
+    g_eye = eye;
+    bound_rt_ = bound_ds_ = nullptr;
 }
 
 // the surface's target at its size, null when there is none
@@ -1090,7 +1105,7 @@ bool D3D12Backend::BindTargets(const State& s) {
     bool depth = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && !DepthOnlySampled(s);
     bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
     bool colour = SimpleState(s, kMColorWriteEnable) != 0;
-    uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1,
+    uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1 | uint32_t(g_eye) << 8,
                          s.rt.header ? kernel::R32(s.rt.header + 12) : 0, s.rt.header ? kernel::R32(s.rt.header + 16) : 0,
                          s.zs.header ? kernel::R32(s.zs.header + 12) : 0, s.zs.header ? kernel::R32(s.zs.header + 16) : 0};
     uint64_t key = Hash(words, sizeof(words));
@@ -1934,7 +1949,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     // BindGuestTexture asks for their sharpened pictures
     uint32_t words[8] = {kernel::R32(header) & 0xFFFF0000u, kernel::R32(header + 4), kernel::R32(header + 12),
                          kernel::R32(header + 16), pal, pal ? kernel::R32(pal + 4) : 0, uint32_t(stage),
-                         uint32_t(draw_2d_)};
+                         uint32_t(draw_2d_) | uint32_t(g_eye) << 8};
     bool memo_ok = !ext_ && !pal;  // a palette's colours may change without its header: checked every time
     uint64_t memo_key = 0;
     if (memo_ok) {
@@ -2467,10 +2482,51 @@ void D3D12Backend::DeliverReports() {
     }
 }
 
+// A headset's two pictures: each eye stands to one side of the title's camera, so what the camera sees moves the other way
+// by that much (vr::EyeOffset, in the title's units) before the projection. Fixed function: the projection's fourth row
+// takes it (x' = x - e in view space is P[3][0] -= e * P[0][0], row vectors). A vertex program multiplying its position by
+// four constants (gpu::MatrixProgram), a perspective there: its x row's constant term, by that row's length (the
+// projection's x scale, for a model drawn at its own size). 2D is left where it is. The state is put back after the draw.
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
-    if (const State* sprites = PointSpriteStages(s, prim)) return Draw(*sprites, prim, start, count, indices);
+    if (!vr::Stereo()) return DrawEye(s, prim, start, count, indices);
+    State& m = const_cast<State&>(s);
+    float* slot = nullptr;
+    float scale = 0;
+    if (s.vs_handle & 1) {
+        if (s.vs) {
+            if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
+            const int k = s.vs->matrix;
+            if (k >= 0 && k + 3 < 192 && !OrthoConstants(s.vsc, k)) {
+                const auto& x = s.vsc[size_t(k)];
+                const auto& w = s.vsc[size_t(k) + 3];
+                // a perspective: w follows the position
+                if (std::fabs(w[0]) + std::fabs(w[1]) + std::fabs(w[2]) > 1e-6f) {
+                    slot = &m.vsc[size_t(k)][3];
+                    scale = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+                }
+            }
+        }
+    } else if ((s.vs_handle & 0xE) != 0x4) {
+        const float* pj = s.transforms[3].data();
+        if (std::fabs(std::fabs(pj[11]) - 1) < 1e-3f && std::fabs(pj[15]) < 1e-3f) {
+            slot = &m.transforms[3][12];
+            scale = pj[0];
+        }
+    }
+    const float kept = slot ? *slot : 0;
+    for (int eye = 0; eye < 2; eye++) {
+        SetEye(eye);
+        if (slot) *slot = kept - vr::EyeOffset(eye) * scale;
+        DrawEye(s, prim, start, count, indices);
+    }
+    if (slot) *slot = kept;
+    SetEye(0);
+}
+
+void D3D12Backend::DrawEye(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    if (const State* sprites = PointSpriteStages(s, prim)) return DrawEye(*sprites, prim, start, count, indices);
     if (s.blank_format && s.textures[0] && (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.blank_format) {
-        Clear(s, 0, nullptr, kClearTarget, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
+        ClearEye(s, 0, nullptr, kClearTarget, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
         return;
     }
     PerfScope perf_draw{g_perf.draw};
@@ -2665,6 +2721,15 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
 
 void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                          uint32_t stencil) {
+    for (int eye = 0; eye < (vr::Stereo() ? 2 : 1); eye++) {
+        SetEye(eye);
+        ClearEye(s, count, rects, flags, color, z, stencil);
+    }
+    SetEye(0);
+}
+
+void D3D12Backend::ClearEye(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
+                            uint32_t stencil) {
     PerfScope perf_clear{g_perf.clear};
     if (cap_) {
         CapStep(s.rt, s.zs);
@@ -2764,6 +2829,15 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
 
 void D3D12Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects,
                         uint32_t dst_points) {
+    for (int eye = 0; eye < (vr::Stereo() ? 2 : 1); eye++) {
+        SetEye(eye);
+        CopyEye(src, dst, count, src_rects, dst_points);
+    }
+    SetEye(0);
+}
+
+void D3D12Backend::CopyEye(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects,
+                           uint32_t dst_points) {
     PerfScope perf_copy{g_perf.copy};
     Target* src_t = FindTarget(src, false);
     if (cap_) {
@@ -3023,7 +3097,11 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
         frame_fmt = t->fmt;
         if (app::Get().smaa && SmaaFrame(*t)) frame = smaa_[2].res.Get(), frame_fmt = kBgra;
         // the headset gets the frame as the title drew it, before the window's scaling and the interface
-        vr::Frame(*this, frame, int(frame_fmt), t->w, t->h);
+        vr::Frame(*this, 0, frame, int(frame_fmt), t->w, t->h);
+        if (Target* r = right_front_) {
+            Transition(r->res.Get(), r->state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            vr::Frame(*this, 1, r->res.Get(), int(r->fmt), r->w, r->h);
+        }
     }
     D3D12_RESOURCE_STATES bs = D3D12_RESOURCE_STATE_PRESENT;
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -3153,6 +3231,15 @@ void D3D12Backend::Present(const Surface& front) {
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (t) Resolve(*t);
+    right_front_ = nullptr;
+    if (vr::Stereo()) {
+        SetEye(1);
+        right_front_ = EnsureTarget(front, false);
+        if (right_front_ && LatchCpuWrite(*right_front_)) UploadTarget(*right_front_, front);
+        if (right_front_) Resolve(*right_front_);
+        SetEye(0);
+        t = EnsureTarget(front, false);  // the map may have grown
+    }
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 

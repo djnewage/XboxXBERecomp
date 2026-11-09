@@ -19,6 +19,9 @@ namespace vr {
 
 bool Enabled();  // the setting is on and OpenXR has not failed for good
 bool Running();  // a session is showing frames: the headset paces the title
+bool Stereo();   // the renderer draws everything twice, a picture an eye
+// how far to the right of the head an eye is (0 left, 1 right), in the title's units (Settings::vr_units a metre)
+float EyeOffset(int eye);
 
 // --- the title's thread ---
 // The head's angles in degrees for the frame the title is about to build: yaw grows to the left, pitch upwards, both 0
@@ -26,13 +29,15 @@ bool Running();  // a session is showing frames: the headset paces the title
 // (level, no roll), until Flat or a quarter of a second without asking. False without a headset to ask.
 bool Head(float& yaw, float& pitch);
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
+// the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands
+bool Controls(float* v);
 void TitlePresented();  // each Swap, before the renderer's Present
 
 // --- the renderer's thread (gpu/d3d12.cpp) ---
 void Start(ID3D12Device* device, ID3D12CommandQueue* queue);
 void NoteDraw(const gpu::State& s, uint32_t count);  // each draw: the frame's projection is read from the scene's
 // while the frame's command list is open, the finished frame a shader resource: copies it for the headset
-void Frame(gpu::Context& ctx, ID3D12Resource* frame, int format, uint32_t width, uint32_t height);
+void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32_t width, uint32_t height);
 void Submit();  // once that list has been handed to the queue
 void Next();    // after the window's present: waits for the headset's next frame
 

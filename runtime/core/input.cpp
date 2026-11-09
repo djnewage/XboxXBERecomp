@@ -1,4 +1,5 @@
 // controllers through SDL: Xbox, PlayStation and Switch pads read into the console controller's report
+#include "vr/vr.h"
 #include "core/input.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -275,6 +276,15 @@ Pad Poll(int port) {
         WheelFeel feel;
         if (app::kGame.wheel) app::kGame.wheel(feel);
         WheelFeedback(feel, g_rumble[0], g_rumble[1]);
+    }
+    // a headset's hand controllers play as controller 1 too (vr/vr.h)
+    float hands[kControls] = {};
+    if (port == 0 && vr::Controls(hands)) {
+        p.connected = true;
+        for (int c = 0; c < kControls; c++) {
+            out[c] = std::max(out[c], hands[c]);
+            in[c] = std::max(in[c], hands[c]);
+        }
     }
     // the keyboard is controller 1, plugged in while keyboard play is on (alt-tabbing away must not unplug it), its
     // keys read while the game window has the focus

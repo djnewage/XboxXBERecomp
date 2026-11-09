@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "app/app.h"
+#include "core/input.h"
 #include "core/log.h"
 #include "gpu/ext.h"
 #include "gpu/shaders.h"
@@ -54,6 +55,16 @@ constexpr uint32_t kMostImages = 16;
     X(xrCreateReferenceSpace)          \
     X(xrDestroySpace)                  \
     X(xrLocateSpace)                   \
+    X(xrLocateViews)                   \
+    X(xrStringToPath)                  \
+    X(xrCreateActionSet)               \
+    X(xrCreateAction)                  \
+    X(xrSuggestInteractionProfileBindings) \
+    X(xrAttachSessionActionSets)       \
+    X(xrSyncActions)                   \
+    X(xrGetActionStateFloat)           \
+    X(xrGetActionStateBoolean)         \
+    X(xrGetActionStateVector2f)        \
     X(xrEnumerateSwapchainFormats)     \
     X(xrCreateSwapchain)               \
     X(xrDestroySwapchain)              \
@@ -95,16 +106,21 @@ XrSystemId g_system = XR_NULL_SYSTEM_ID;
 XrSession g_session = XR_NULL_HANDLE;
 XrSpace g_local = XR_NULL_HANDLE, g_view = XR_NULL_HANDLE;
 uint64_t g_retry_at = 0;
-bool g_begun = false, g_should_render = false, g_drew = false;
+bool g_begun = false, g_should_render = false;
 XrTime g_time = 0;
 Pose g_shown;  // the pose of the frame being shown
 
-XrSwapchain g_swap = XR_NULL_HANDLE;
-uint32_t g_swap_w = 0, g_swap_h = 0;
+// a swap chain an eye: the left one alone shows a frame drawn once
+struct Chain {
+    XrSwapchain swap = XR_NULL_HANDLE;
+    uint32_t w = 0, h = 0;
+    std::vector<XrSwapchainImageD3D12KHR> images;
+    bool drew = false;
+} g_chain[2];
 DXGI_FORMAT g_swap_format = DXGI_FORMAT_UNKNOWN;
 ComPtr<ID3D12DescriptorHeap> g_rtv_heap;
 uint32_t g_rtv_inc = 0;
-std::vector<XrSwapchainImageD3D12KHR> g_images;
+std::atomic<float> g_half_ipd{0.0315f};  // metres, half the distance between the eyes
 
 // the scene's projection this frame: the perspective projection most vertices were drawn with
 struct Seen {
@@ -113,6 +129,142 @@ struct Seen {
 };
 std::vector<Seen> g_seen;
 float g_tan_x = 0, g_tan_y = 0;
+
+// The hand controllers play controller 1 (input::Poll takes Controls): the left stick walks, the right one turns (the head
+// looks up and down) and jumps pushed up, the triggers are the triggers, the right hand's A and B the console's, its grip
+// Black; the left hand's A is White, its B Start, its grip X, its trackpad the d-pad.
+XrActionSet g_actions = XR_NULL_HANDLE;
+XrAction g_trigger, g_grip, g_a, g_b, g_stick, g_click, g_pad, g_pad_force;
+XrPath g_hand[2];
+float g_controls[input::kControls] = {};  // g_lock
+bool g_controls_live = false;
+
+XrPath Path(const char* text) {
+    XrPath p = XR_NULL_PATH;
+    xrStringToPath(g_instance, text, &p);
+    return p;
+}
+
+void CreateActions() {
+    XrActionSetCreateInfo set{XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strcpy(set.actionSetName, "game");
+    std::strcpy(set.localizedActionSetName, "Game");
+    if (XR_FAILED(xrCreateActionSet(g_instance, &set, &g_actions))) {
+        g_actions = XR_NULL_HANDLE;
+        LOGR("vr: no action set, the hand controllers are not read");
+        return;
+    }
+    g_hand[0] = Path("/user/hand/left");
+    g_hand[1] = Path("/user/hand/right");
+    const auto make = [](XrAction& a, XrActionType type, const char* name, const char* shown) {
+        XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
+        info.actionType = type;
+        std::strcpy(info.actionName, name);
+        std::strcpy(info.localizedActionName, shown);
+        info.countSubactionPaths = 2;
+        info.subactionPaths = g_hand;
+        xrCreateAction(g_actions, &info, &a);
+    };
+    make(g_trigger, XR_ACTION_TYPE_FLOAT_INPUT, "trigger", "Trigger");
+    make(g_grip, XR_ACTION_TYPE_FLOAT_INPUT, "grip", "Grip");
+    make(g_a, XR_ACTION_TYPE_BOOLEAN_INPUT, "a", "Lower button");
+    make(g_b, XR_ACTION_TYPE_BOOLEAN_INPUT, "b", "Upper button");
+    make(g_stick, XR_ACTION_TYPE_VECTOR2F_INPUT, "stick", "Stick");
+    make(g_click, XR_ACTION_TYPE_BOOLEAN_INPUT, "stick_click", "Stick click");
+    make(g_pad, XR_ACTION_TYPE_VECTOR2F_INPUT, "pad", "Trackpad");
+    make(g_pad_force, XR_ACTION_TYPE_FLOAT_INPUT, "pad_force", "Trackpad press");
+    const auto suggest = [](const char* profile, std::vector<XrActionSuggestedBinding> b) {
+        XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        sb.interactionProfile = Path(profile);
+        sb.countSuggestedBindings = uint32_t(b.size());
+        sb.suggestedBindings = b.data();
+        XrResult r = xrSuggestInteractionProfileBindings(g_instance, &sb);
+        if (XR_FAILED(r)) LOGR("vr: the bindings for %s were not taken (%d)", profile, int(r));
+    };
+    suggest("/interaction_profiles/valve/index_controller",
+            {{g_trigger, Path("/user/hand/left/input/trigger/value")}, {g_trigger, Path("/user/hand/right/input/trigger/value")},
+             {g_grip, Path("/user/hand/left/input/squeeze/force")}, {g_grip, Path("/user/hand/right/input/squeeze/force")},
+             {g_a, Path("/user/hand/left/input/a/click")}, {g_a, Path("/user/hand/right/input/a/click")},
+             {g_b, Path("/user/hand/left/input/b/click")}, {g_b, Path("/user/hand/right/input/b/click")},
+             {g_stick, Path("/user/hand/left/input/thumbstick")}, {g_stick, Path("/user/hand/right/input/thumbstick")},
+             {g_click, Path("/user/hand/left/input/thumbstick/click")}, {g_click, Path("/user/hand/right/input/thumbstick/click")},
+             {g_pad, Path("/user/hand/left/input/trackpad")}, {g_pad, Path("/user/hand/right/input/trackpad")},
+             {g_pad_force, Path("/user/hand/left/input/trackpad/force")}, {g_pad_force, Path("/user/hand/right/input/trackpad/force")}});
+    suggest("/interaction_profiles/oculus/touch_controller",
+            {{g_trigger, Path("/user/hand/left/input/trigger/value")}, {g_trigger, Path("/user/hand/right/input/trigger/value")},
+             {g_grip, Path("/user/hand/left/input/squeeze/value")}, {g_grip, Path("/user/hand/right/input/squeeze/value")},
+             {g_a, Path("/user/hand/left/input/x/click")}, {g_a, Path("/user/hand/right/input/a/click")},
+             {g_b, Path("/user/hand/left/input/y/click")}, {g_b, Path("/user/hand/right/input/b/click")},
+             {g_stick, Path("/user/hand/left/input/thumbstick")}, {g_stick, Path("/user/hand/right/input/thumbstick")},
+             {g_click, Path("/user/hand/left/input/thumbstick/click")}, {g_click, Path("/user/hand/right/input/thumbstick/click")}});
+}
+
+void AttachActions() {
+    if (g_actions == XR_NULL_HANDLE) return;
+    XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attach.countActionSets = 1;
+    attach.actionSets = &g_actions;
+    XrResult r = xrAttachSessionActionSets(g_session, &attach);
+    if (XR_FAILED(r)) LOGR("vr: the hand controllers' actions were not attached (%d)", int(r));
+    else LOGR("vr: the hand controllers play controller 1");
+}
+
+float Float(XrAction a, int hand) {
+    XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+    get.action = a;
+    get.subactionPath = g_hand[hand];
+    XrActionStateFloat st{XR_TYPE_ACTION_STATE_FLOAT};
+    return XR_SUCCEEDED(xrGetActionStateFloat(g_session, &get, &st)) && st.isActive ? st.currentState : 0;
+}
+bool Bool(XrAction a, int hand) {
+    XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+    get.action = a;
+    get.subactionPath = g_hand[hand];
+    XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+    return XR_SUCCEEDED(xrGetActionStateBoolean(g_session, &get, &st)) && st.isActive && st.currentState;
+}
+XrVector2f Vec(XrAction a, int hand, bool* active = nullptr) {
+    XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+    get.action = a;
+    get.subactionPath = g_hand[hand];
+    XrActionStateVector2f st{XR_TYPE_ACTION_STATE_VECTOR2F};
+    bool ok = XR_SUCCEEDED(xrGetActionStateVector2f(g_session, &get, &st)) && st.isActive;
+    if (active) *active = ok;
+    return ok ? st.currentState : XrVector2f{0, 0};
+}
+
+void ReadControls() {
+    using namespace input;
+    float v[kControls] = {};
+    bool live = false;
+    XrActiveActionSet active{g_actions, XR_NULL_PATH};
+    XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+    sync.countActiveActionSets = 1;
+    sync.activeActionSets = &active;
+    if (g_actions != XR_NULL_HANDLE && xrSyncActions(g_session, &sync) == XR_SUCCESS) {
+        bool left_on = false, right_on = false;
+        XrVector2f l = Vec(g_stick, 0, &left_on), r = Vec(g_stick, 1, &right_on);
+        live = left_on || right_on;
+        v[kLSLeft] = std::max(-l.x, 0.0f), v[kLSRight] = std::max(l.x, 0.0f);
+        v[kLSUp] = std::max(l.y, 0.0f), v[kLSDown] = std::max(-l.y, 0.0f);
+        v[kRSLeft] = std::max(-r.x, 0.0f), v[kRSRight] = std::max(r.x, 0.0f);
+        v[kY] = r.y > 0.7f;  // jump
+        v[kLT] = Float(g_trigger, 0), v[kRT] = Float(g_trigger, 1);
+        v[kX] = Float(g_grip, 0) > 0.35f;      // crouch
+        v[kBlack] = Float(g_grip, 1) > 0.35f;  // alt. fire
+        v[kA] = Bool(g_a, 1), v[kB] = Bool(g_b, 1);
+        v[kWhite] = Bool(g_a, 0), v[kStart] = Bool(g_b, 0);
+        v[kLThumb] = Bool(g_click, 0), v[kRThumb] = Bool(g_click, 1);
+        if (Float(g_pad_force, 0) > 0.3f) {
+            XrVector2f d = Vec(g_pad, 0);
+            if (std::fabs(d.x) > std::fabs(d.y)) v[d.x < 0 ? kLeft : kRight] = 1;
+            else v[d.y > 0 ? kUp : kDown] = 1;
+        }
+    }
+    std::lock_guard lock(g_lock);
+    std::memcpy(g_controls, v, sizeof(v));
+    g_controls_live = live;
+}
 
 const char kCopyHlsl[] = R"(
 cbuffer B : register(b1) { float4 opts; float4 unused; };
@@ -152,23 +304,21 @@ void Angles(const XrQuaternionf& q, float& yaw, float& pitch) {
     pitch = std::asin(std::clamp(fy, -1.0f, 1.0f));
 }
 
-void DropSwapchain() {
-    if (g_swap != XR_NULL_HANDLE) xrDestroySwapchain(g_swap);
-    g_swap = XR_NULL_HANDLE;
-    g_images.clear();
-    g_swap_w = g_swap_h = 0;
+void DropSwapchain(Chain& c) {
+    if (c.swap != XR_NULL_HANDLE) xrDestroySwapchain(c.swap);
+    c = {};
 }
 
 void DropSession(const char* why) {
     LOGR("vr: the session ends (%s)", why);
-    DropSwapchain();
+    for (Chain& c : g_chain) DropSwapchain(c);
     if (g_view != XR_NULL_HANDLE) xrDestroySpace(g_view);
     if (g_local != XR_NULL_HANDLE) xrDestroySpace(g_local);
     if (g_session != XR_NULL_HANDLE) xrDestroySession(g_session);
     g_view = g_local = XR_NULL_HANDLE;
     g_session = XR_NULL_HANDLE;
     g_system = XR_NULL_SYSTEM_ID;
-    g_begun = g_drew = false;
+    g_begun = false;
     g_running = false;
     {
         std::lock_guard lock(g_lock);
@@ -212,6 +362,7 @@ bool CreateInstance() {
     XR_FUNCTIONS(XR_RESOLVE)
 #undef XR_RESOLVE
     if (!all) return Fail("the runtime lacks a function"), false;
+    CreateActions();
     XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
     if (XR_SUCCEEDED(xrGetInstanceProperties(g_instance, &props)))
         LOGR("vr: OpenXR runtime %s %u.%u.%u", props.runtimeName, unsigned(XR_VERSION_MAJOR(props.runtimeVersion)),
@@ -266,10 +417,11 @@ bool CreateSession() {
     }
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    hd.NumDescriptors = kMostImages;
+    hd.NumDescriptors = 2 * kMostImages;
     if (!g_rtv_heap) g_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g_rtv_heap));
     g_rtv_inc = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     LOGR("vr: session made on the Direct3D 12 device");
+    AttachActions();
     return true;
 }
 
@@ -302,9 +454,10 @@ void PollEvents() {
     }
 }
 
-bool EnsureSwapchain(uint32_t w, uint32_t h) {
-    if (g_swap != XR_NULL_HANDLE && w == g_swap_w && h == g_swap_h) return true;
-    DropSwapchain();
+bool EnsureSwapchain(int eye, uint32_t w, uint32_t h) {
+    Chain& c = g_chain[eye];
+    if (c.swap != XR_NULL_HANDLE && w == c.w && h == c.h) return true;
+    DropSwapchain(c);
     uint32_t n = 0;
     xrEnumerateSwapchainFormats(g_session, 0, &n, nullptr);
     std::vector<int64_t> formats(n);
@@ -322,26 +475,26 @@ bool EnsureSwapchain(uint32_t w, uint32_t h) {
     ci.width = w;
     ci.height = h;
     ci.faceCount = ci.arraySize = ci.mipCount = 1;
-    XrResult r = xrCreateSwapchain(g_session, &ci, &g_swap);
+    XrResult r = xrCreateSwapchain(g_session, &ci, &c.swap);
     if (XR_FAILED(r)) {
         LOGR("vr: xrCreateSwapchain %ux%u failed (%d)", w, h, int(r));
-        g_swap = XR_NULL_HANDLE;
+        c.swap = XR_NULL_HANDLE;
         return false;
     }
-    xrEnumerateSwapchainImages(g_swap, 0, &n, nullptr);
+    xrEnumerateSwapchainImages(c.swap, 0, &n, nullptr);
     n = std::min(n, kMostImages);
-    g_images.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
-    xrEnumerateSwapchainImages(g_swap, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(g_images.data()));
+    c.images.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+    xrEnumerateSwapchainImages(c.swap, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(c.images.data()));
     for (uint32_t i = 0; i < n; i++) {
         D3D12_RENDER_TARGET_VIEW_DESC rv{};
         rv.Format = g_swap_format;
         rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         auto h0 = g_rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        h0.ptr += size_t(i) * g_rtv_inc;
-        g_device->CreateRenderTargetView(g_images[i].texture, &rv, h0);
+        h0.ptr += size_t(uint32_t(eye) * kMostImages + i) * g_rtv_inc;
+        g_device->CreateRenderTargetView(c.images[i].texture, &rv, h0);
     }
-    g_swap_w = w, g_swap_h = h;
-    LOGR("vr: swap chain %ux%u, format %d, %u images", w, h, int(g_swap_format), n);
+    c.w = w, c.h = h;
+    LOGR("vr: swap chain %d %ux%u, format %d, %u images", eye, w, h, int(g_swap_format), n);
     return true;
 }
 
@@ -356,11 +509,33 @@ void LocateHead() {
     g_head.world = true;
     Angles(loc.pose.orientation, g_head.yaw, g_head.pitch);
     g_head.position = loc.pose.position;
+    XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+    info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    info.displayTime = g_time;
+    info.space = g_view;
+    XrViewState vs{XR_TYPE_VIEW_STATE};
+    XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+    uint32_t n = 0;
+    if (XR_SUCCEEDED(xrLocateViews(g_session, &info, &vs, 2, &n, views)) && n == 2 && (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)) {
+        float dx = views[1].pose.position.x - views[0].pose.position.x, dy = views[1].pose.position.y - views[0].pose.position.y,
+              dz = views[1].pose.position.z - views[0].pose.position.z;
+        float half = std::sqrt(dx * dx + dy * dy + dz * dz) / 2;
+        if (half > 0.02f && half < 0.045f) g_half_ipd = half;
+    }
 }
 }  // namespace
 
 bool Enabled() { return app::Get().vr && !g_failed; }
 bool Running() { return g_running; }
+bool Stereo() { return g_running; }
+float EyeOffset(int eye) { return (eye ? 1.0f : -1.0f) * g_half_ipd * float(app::Get().vr_units); }
+
+bool Controls(float* v) {
+    std::lock_guard lock(g_lock);
+    if (!g_running || !g_controls_live) return false;
+    std::memcpy(v, g_controls, sizeof(g_controls));
+    return true;
+}
 
 bool Head(float& yaw, float& pitch) {
     std::lock_guard lock(g_lock);
@@ -394,32 +569,8 @@ void Start(ID3D12Device* device, ID3D12CommandQueue* queue) {
     g_retry_at = GetTickCount64() + kRetryMs;
 }
 
-// what the frame was drawn with, logged now and then until the projection is understood
-struct Diag {
-    uint64_t fixed = 0, pre = 0, program = 0, no_matrix = 0, world = 0, screen = 0, frames = 0;
-    uint64_t most_fixed = 0, most_program = 0;
-    float proj[16] = {}, comp[16] = {};
-    int k = -1;
-} g_diag;
-
 void NoteDraw(const gpu::State& s, uint32_t count) {
     if (!g_running) return;
-    if (s.vs_handle & 1) {
-        int k = s.vs ? gpu::MatrixProgram(s.vs->program) : -1;
-        if (k < 0 || k + 3 >= 192) g_diag.no_matrix += count;
-        else {
-            g_diag.program += count;
-            if (count > g_diag.most_program) {
-                g_diag.most_program = count, g_diag.k = k;
-                std::memcpy(g_diag.comp, s.vsc[size_t(k)].data(), 64);
-            }
-        }
-    } else if ((s.vs_handle & 0xE) == 0x4) {
-        g_diag.pre += count;
-    } else {
-        g_diag.fixed += count;
-        if (count > g_diag.most_fixed) g_diag.most_fixed = count, std::memcpy(g_diag.proj, s.transforms[3].data(), 64);
-    }
     // the fixed function with a perspective projection (D3DTS_PROJECTION, kept at 3): w is the view's z
     if ((s.vs_handle & 1) || (s.vs_handle & 0xE) == 0x4) return;
     const float* m = s.transforms[3].data();
@@ -433,56 +584,44 @@ void NoteDraw(const gpu::State& s, uint32_t count) {
     if (g_seen.size() < 16) g_seen.push_back({x, y, count});
 }
 
-void Frame(gpu::Context& ctx, ID3D12Resource* frame, int format, uint32_t width, uint32_t height) {
-    // the frame's projection, whether or not it is shown
-    const Seen* most = nullptr;
-    for (const Seen& seen : g_seen)
-        if (!most || seen.vertices > most->vertices) most = &seen;
-    if (most && (std::fabs(most->x - g_tan_x) > 1e-3f || std::fabs(most->y - g_tan_y) > 1e-3f)) {
-        g_tan_x = most->x, g_tan_y = most->y;
-        LOGR("vr: the scene's field of view %.1f by %.1f degrees", 2 * std::atan(g_tan_x) * 180 / kPi, 2 * std::atan(g_tan_y) * 180 / kPi);
-    }
-    g_seen.clear();
-    {
+void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32_t width, uint32_t height) {
+    Chain& c = g_chain[eye];
+    if (eye == 0) {
+        // the frame's projection, whether or not it is shown
+        const Seen* most = nullptr;
+        for (const Seen& seen : g_seen)
+            if (!most || seen.vertices > most->vertices) most = &seen;
+        if (most && (std::fabs(most->x - g_tan_x) > 1e-3f || std::fabs(most->y - g_tan_y) > 1e-3f)) {
+            g_tan_x = most->x, g_tan_y = most->y;
+            LOG_FIRST(8, "vr: the scene's field of view %.1f by %.1f degrees", 2 * std::atan(g_tan_x) * 180 / kPi, 2 * std::atan(g_tan_y) * 180 / kPi);
+        }
+        g_seen.clear();
         std::lock_guard lock(g_lock);
         if (!g_poses.empty()) {
             g_shown = g_poses.front();
             g_poses.pop_front();
         }
+        g_chain[0].drew = g_chain[1].drew = false;
     }
-    (g_shown.world ? g_diag.world : g_diag.screen)++;
-    if (++g_diag.frames >= 400) {
-        const Diag& d = g_diag;
-        LOGR("vr: 400 frames, %llu world %llu screen; vertices fixed %llu, pretransformed %llu, programs %llu (c%d), programs without a matrix %llu",
-             d.world, d.screen, d.fixed, d.pre, d.program, d.k, d.no_matrix);
-        if (d.most_fixed)
-            LOGR("vr:  projection %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f", d.proj[0], d.proj[1], d.proj[2], d.proj[3],
-                 d.proj[4], d.proj[5], d.proj[6], d.proj[7], d.proj[8], d.proj[9], d.proj[10], d.proj[11], d.proj[12], d.proj[13], d.proj[14], d.proj[15]);
-        if (d.most_program)
-            LOGR("vr:  program matrix %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f", d.comp[0], d.comp[1], d.comp[2], d.comp[3],
-                 d.comp[4], d.comp[5], d.comp[6], d.comp[7], d.comp[8], d.comp[9], d.comp[10], d.comp[11], d.comp[12], d.comp[13], d.comp[14], d.comp[15]);
-        g_diag = {};
-    }
-    g_drew = false;
-    if (!g_begun || !g_should_render || !frame || !EnsureSwapchain(width, height)) return;
+    if (!g_begun || !g_should_render || !frame || !EnsureSwapchain(eye, width, height)) return;
     uint32_t index = 0;
     XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    if (XR_FAILED(xrAcquireSwapchainImage(g_swap, &acquire, &index))) return;
+    if (XR_FAILED(xrAcquireSwapchainImage(c.swap, &acquire, &index))) return;
     XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wait.timeout = XR_INFINITE_DURATION;
-    if (XR_FAILED(xrWaitSwapchainImage(g_swap, &wait)) || index >= g_images.size()) {
+    if (XR_FAILED(xrWaitSwapchainImage(c.swap, &wait)) || index >= c.images.size()) {
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(g_swap, &release);
+        xrReleaseSwapchainImage(c.swap, &release);
         return;
     }
     auto rtv = g_rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += size_t(index) * g_rtv_inc;
+    rtv.ptr += size_t(uint32_t(eye) * kMostImages + index) * g_rtv_inc;
     ID3D12Resource* const src[3] = {frame, nullptr, nullptr};
     const DXGI_FORMAT fmt[3] = {DXGI_FORMAT(format), DXGI_FORMAT(format), DXGI_FORMAT(format)};
     const float p[8] = {Srgb(g_swap_format) ? 1.0f : 0.0f};
     ctx.Pass(kCopyHlsl, "psvr", g_swap_format, rtv, width, height, src, fmt, p, -1);
     ctx.Unbind();
-    g_drew = true;
+    c.drew = true;
 }
 
 void Submit() {
@@ -493,19 +632,26 @@ void Submit() {
     XrCompositionLayerQuad screen{XR_TYPE_COMPOSITION_LAYER_QUAD};
     const XrCompositionLayerBaseHeader* layers[1] = {};
     uint32_t count = 0;
-    if (g_drew) {
-        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(g_swap, &release);
-        XrSwapchainSubImage image{g_swap, {{0, 0}, {int32_t(g_swap_w), int32_t(g_swap_h)}}, 0};
-        float aspect = float(g_swap_w) / float(g_swap_h);
+    for (Chain& c : g_chain)
+        if (c.drew) {
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            xrReleaseSwapchainImage(c.swap, &release);
+        }
+    if (g_chain[0].drew) {
+        const Chain& left = g_chain[0];
+        float aspect = float(left.w) / float(left.h);
         if (g_shown.world) {
-            // one picture for both eyes, drawn level from the head's place: no depth yet
+            // each eye's picture, drawn level from its place beside the head's; the left one for both when only it was drawn
             float ty = g_tan_y > 0 ? g_tan_y : std::tan(30 * kPi / 180), tx = g_tan_x > 0 ? g_tan_x : ty * aspect;
-            for (auto& v : views) {
-                v.pose.orientation = Level(g_shown.yaw, g_shown.pitch);
-                v.pose.position = g_shown.position;
-                v.fov = {-std::atan(tx), std::atan(tx), std::atan(ty), -std::atan(ty)};
-                v.subImage = image;
+            bool both = g_chain[1].drew;
+            for (int i = 0; i < 2; i++) {
+                const Chain& c = g_chain[both ? i : 0];
+                float side = both ? (i ? 1.0f : -1.0f) * g_half_ipd : 0;
+                views[i].pose.orientation = Level(g_shown.yaw, g_shown.pitch);
+                views[i].pose.position = {g_shown.position.x + side * std::cos(g_shown.yaw), g_shown.position.y,
+                                          g_shown.position.z - side * std::sin(g_shown.yaw)};
+                views[i].fov = {-std::atan(tx), std::atan(tx), std::atan(ty), -std::atan(ty)};
+                views[i].subImage = {c.swap, {{0, 0}, {int32_t(c.w), int32_t(c.h)}}, 0};
             }
             world.space = g_local;
             world.viewCount = 2;
@@ -514,7 +660,7 @@ void Submit() {
         } else {
             screen.space = g_local;
             screen.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            screen.subImage = image;
+            screen.subImage = {left.swap, {{0, 0}, {int32_t(left.w), int32_t(left.h)}}, 0};
             screen.pose.orientation = {0, 0, 0, 1};
             screen.pose.position = {0, 0, -kScreenDistance};
             screen.size = {kScreenWidth, kScreenWidth / aspect};
@@ -528,7 +674,7 @@ void Submit() {
     end.layers = layers;
     XrResult r = xrEndFrame(g_session, &end);
     if (XR_FAILED(r)) LOG_FIRST(8, "vr: xrEndFrame failed (%d)", int(r));
-    g_drew = false;
+    g_chain[0].drew = g_chain[1].drew = false;
 }
 
 void Next() {
@@ -551,6 +697,7 @@ void Next() {
     g_should_render = state.shouldRender;
     g_time = state.predictedDisplayTime;
     LocateHead();
+    ReadControls();
 }
 
 }  // namespace vr
