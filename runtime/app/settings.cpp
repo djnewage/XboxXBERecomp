@@ -16,6 +16,7 @@
 
 #include <toml++/toml.hpp>
 
+#include "vr/vr.h"
 #include "app/app.h"
 #include "core/input.h"
 #include "core/log.h"
@@ -426,6 +427,7 @@ bool Widescreen() {
     static std::atomic<uint64_t> key{~0ull};
     static std::atomic<bool> wide{true};
     const Settings& s = Get();
+    if (vr::Enabled()) return false;  // a headset: the title's own 4:3 frame, nothing laid out for a wide screen
     if (s.aspect == 1) return false;
     if (s.aspect >= 2) return true;
     uint64_t k = (uint64_t(s.width) << 32 | s.height) ^ uint64_t(s.monitor) << 60;

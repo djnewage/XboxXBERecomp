@@ -22,9 +22,10 @@ bool Running();  // a session is showing frames: the headset paces the title
 
 // --- the title's thread ---
 // The head's angles in degrees for the frame the title is about to build: yaw grows to the left, pitch upwards, both 0
-// looking ahead as the session started. Asking marks that frame as a view of the world drawn at these angles (level, no
-// roll). False without a headset to ask.
+// looking ahead as the session started. Asking marks the frames from here as views of the world drawn at these angles
+// (level, no roll), until Flat or a quarter of a second without asking. False without a headset to ask.
 bool Head(float& yaw, float& pitch);
+void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 void TitlePresented();  // each Swap, before the renderer's Present
 
 // --- the renderer's thread (gpu/d3d12.cpp) ---

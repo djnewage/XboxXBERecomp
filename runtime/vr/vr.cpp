@@ -28,6 +28,7 @@
 #include "app/app.h"
 #include "core/log.h"
 #include "gpu/ext.h"
+#include "gpu/shaders.h"
 #include "gpu/state.h"
 #include "vr/vr.h"
 
@@ -82,7 +83,8 @@ std::atomic<bool> g_failed{false}, g_running{false};
 std::mutex g_lock;
 bool g_head_valid = false;
 Pose g_head;
-Pose g_title;              // what the title's frame in the making asked for
+Pose g_title;              // what the title last asked for: its frames are drawn with it until it says otherwise
+uint64_t g_title_at = 0;    // when (GetTickCount64): a title that stops saying has no such view any more
 std::deque<Pose> g_poses;  // one per title frame presented, in order
 
 // --- the renderer's thread from here ---
@@ -364,16 +366,22 @@ bool Head(float& yaw, float& pitch) {
     std::lock_guard lock(g_lock);
     if (!g_running || !g_head_valid) return false;
     g_title = g_head;
+    g_title_at = GetTickCount64();
     yaw = g_head.yaw * 180 / kPi;
     pitch = g_head.pitch * 180 / kPi;
     return true;
 }
 
+void Flat() {
+    std::lock_guard lock(g_lock);
+    g_title = {};
+}
+
 void TitlePresented() {
     if (!g_running) return;
     std::lock_guard lock(g_lock);
+    if (GetTickCount64() - g_title_at > 250) g_title = {};
     if (g_poses.size() < 8) g_poses.push_back(g_title);
-    g_title = {};
 }
 
 void Start(ID3D12Device* device, ID3D12CommandQueue* queue) {
@@ -386,12 +394,36 @@ void Start(ID3D12Device* device, ID3D12CommandQueue* queue) {
     g_retry_at = GetTickCount64() + kRetryMs;
 }
 
+// what the frame was drawn with, logged now and then until the projection is understood
+struct Diag {
+    uint64_t fixed = 0, pre = 0, program = 0, no_matrix = 0, world = 0, screen = 0, frames = 0;
+    uint64_t most_fixed = 0, most_program = 0;
+    float proj[16] = {}, comp[16] = {};
+    int k = -1;
+} g_diag;
+
 void NoteDraw(const gpu::State& s, uint32_t count) {
     if (!g_running) return;
+    if (s.vs_handle & 1) {
+        int k = s.vs ? gpu::MatrixProgram(s.vs->program) : -1;
+        if (k < 0 || k + 3 >= 192) g_diag.no_matrix += count;
+        else {
+            g_diag.program += count;
+            if (count > g_diag.most_program) {
+                g_diag.most_program = count, g_diag.k = k;
+                std::memcpy(g_diag.comp, s.vsc[size_t(k)].data(), 64);
+            }
+        }
+    } else if ((s.vs_handle & 0xE) == 0x4) {
+        g_diag.pre += count;
+    } else {
+        g_diag.fixed += count;
+        if (count > g_diag.most_fixed) g_diag.most_fixed = count, std::memcpy(g_diag.proj, s.transforms[3].data(), 64);
+    }
     // the fixed function with a perspective projection (D3DTS_PROJECTION, kept at 3): w is the view's z
     if ((s.vs_handle & 1) || (s.vs_handle & 0xE) == 0x4) return;
     const float* m = s.transforms[3].data();
-    if (!(m[0] > 0.05f) || !(m[5] > 0.05f) || std::fabs(m[11] - 1) > 1e-3f || std::fabs(m[15]) > 1e-3f) return;
+    if (!(m[0] > 0.05f) || !(m[5] > 0.05f) || std::fabs(std::fabs(m[11]) - 1) > 1e-3f || std::fabs(m[15]) > 1e-3f) return;
     float x = 1 / m[0], y = 1 / m[5];
     for (Seen& seen : g_seen)
         if (std::fabs(seen.x - x) < 1e-4f && std::fabs(seen.y - y) < 1e-4f) {
@@ -417,6 +449,19 @@ void Frame(gpu::Context& ctx, ID3D12Resource* frame, int format, uint32_t width,
             g_shown = g_poses.front();
             g_poses.pop_front();
         }
+    }
+    (g_shown.world ? g_diag.world : g_diag.screen)++;
+    if (++g_diag.frames >= 400) {
+        const Diag& d = g_diag;
+        LOGR("vr: 400 frames, %llu world %llu screen; vertices fixed %llu, pretransformed %llu, programs %llu (c%d), programs without a matrix %llu",
+             d.world, d.screen, d.fixed, d.pre, d.program, d.k, d.no_matrix);
+        if (d.most_fixed)
+            LOGR("vr:  projection %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f", d.proj[0], d.proj[1], d.proj[2], d.proj[3],
+                 d.proj[4], d.proj[5], d.proj[6], d.proj[7], d.proj[8], d.proj[9], d.proj[10], d.proj[11], d.proj[12], d.proj[13], d.proj[14], d.proj[15]);
+        if (d.most_program)
+            LOGR("vr:  program matrix %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f", d.comp[0], d.comp[1], d.comp[2], d.comp[3],
+                 d.comp[4], d.comp[5], d.comp[6], d.comp[7], d.comp[8], d.comp[9], d.comp[10], d.comp[11], d.comp[12], d.comp[13], d.comp[14], d.comp[15]);
+        g_diag = {};
     }
     g_drew = false;
     if (!g_begun || !g_should_render || !frame || !EnsureSwapchain(width, height)) return;
