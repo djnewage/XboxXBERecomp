@@ -36,6 +36,12 @@ bool Fov(float& tan_x, float& tan_y);  // the tangents of the half angles the fr
 bool Head(float& yaw, float& pitch);
 // the title's camera stands still (a level paused): its frames stay views of the world at the angles last asked for,
 // seen from where the head is now
+// the turn from the title's camera to the head for the frame the title is building (as Eye's, for its own culling);
+// false when that frame is not a view of the world
+bool TitleTurn(float turn[9]);
+// the frame the title is building is drawn at this pitch after all (degrees, upwards), not the one Head gave: a title
+// whose camera did not follow
+void Pitch(float up);
 void Hold();
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands

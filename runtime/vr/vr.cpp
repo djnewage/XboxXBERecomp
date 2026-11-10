@@ -575,6 +575,12 @@ bool Head(float& yaw, float& pitch) {
     return true;
 }
 
+void Pitch(float up) {
+    std::lock_guard lock(g_lock);
+    Pose& pose = g_frames[g_title_frame % kFrames];
+    if (pose.world) pose.pitch = up * kPi / 180;
+}
+
 void Hold() {
     std::lock_guard lock(g_lock);
     Pose& pose = g_frames[g_title_frame % kFrames];
@@ -598,6 +604,14 @@ void TitlePresented() {
 
 namespace {
 XrQuaternionf Conj(const XrQuaternionf& q) { return {-q.x, -q.y, -q.z, q.w}; }
+// from the title's camera to the head
+void Turn(const Pose& pose, float turn[9]) {
+    const XrQuaternionf q = Mul(Conj(Level(pose.yaw, pose.pitch)), pose.head);
+    const float x = q.x, y = q.y, z = q.z, w = q.w;
+    turn[0] = 1 - 2 * (y * y + z * z), turn[1] = 2 * (x * y - z * w), turn[2] = 2 * (x * z + y * w);
+    turn[3] = 2 * (x * y + z * w), turn[4] = 1 - 2 * (x * x + z * z), turn[5] = 2 * (y * z - x * w);
+    turn[6] = 2 * (x * z - y * w), turn[7] = 2 * (y * z + x * w), turn[8] = 1 - 2 * (x * x + y * y);
+}
 }  // namespace
 
 bool Fov(float& tan_x, float& tan_y) {
@@ -612,13 +626,19 @@ bool Eye(int eye, float turn[9], float& offset) {
         pose = g_frames[g_render_frame % kFrames];
     }
     if (!g_running || !pose.world) return false;
-    // from the title's camera to the head
-    const XrQuaternionf q = Mul(Conj(Level(pose.yaw, pose.pitch)), pose.head);
-    const float x = q.x, y = q.y, z = q.z, w = q.w;
-    turn[0] = 1 - 2 * (y * y + z * z), turn[1] = 2 * (x * y - z * w), turn[2] = 2 * (x * z + y * w);
-    turn[3] = 2 * (x * y + z * w), turn[4] = 1 - 2 * (x * x + z * z), turn[5] = 2 * (y * z - x * w);
-    turn[6] = 2 * (x * z - y * w), turn[7] = 2 * (y * z + x * w), turn[8] = 1 - 2 * (x * x + y * y);
+    Turn(pose, turn);
     offset = EyeOffset(eye);
+    return true;
+}
+
+bool TitleTurn(float turn[9]) {
+    Pose pose;
+    {
+        std::lock_guard lock(g_lock);
+        pose = g_frames[g_title_frame % kFrames];
+    }
+    if (!g_running || !pose.world) return false;
+    Turn(pose, turn);
     return true;
 }
 
