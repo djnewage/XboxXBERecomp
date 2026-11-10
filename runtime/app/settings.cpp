@@ -229,6 +229,7 @@ void Load() {
     s.low_latency = t["low_latency"].value_or(s.low_latency);
     s.vr = t["vr"].value_or(s.vr);
     s.vr_hand_aim = t["vr_hand_aim"].value_or(s.vr_hand_aim);
+    s.vr_snap_turn = std::min<uint32_t>(t["vr_snap_turn"].value_or(s.vr_snap_turn), 90);
     s.vr_hud_distance = std::clamp<uint32_t>(t["vr_hud_distance"].value_or(s.vr_hud_distance), 100, 1000);
     s.vr_units = std::clamp<uint32_t>(t["vr_units"].value_or(s.vr_units), 1, 1000);
     s.sharpen = std::min<uint32_t>(t["sharpen"].value_or(s.sharpen), 100);
@@ -327,6 +328,7 @@ toml::table Table() {
                   {"low_latency", s.low_latency},
                   {"vr", s.vr},
                   {"vr_hand_aim", s.vr_hand_aim},
+                  {"vr_snap_turn", int64_t(s.vr_snap_turn)},
                   {"vr_hud_distance", int64_t(s.vr_hud_distance)},
                   {"vr_units", int64_t(s.vr_units)},
                   {"sharpen", int64_t(s.sharpen)},

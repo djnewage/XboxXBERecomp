@@ -2494,7 +2494,7 @@ void D3D12Backend::DeliverReports() {
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     if (!vr::Stereo()) return DrawEye(s, prim, start, count, indices);
     State& m = const_cast<State&>(s);
-    float turn[9], offset = 0;
+    float turn[9], shift[3] = {};
     int kind = 0;  // 1 the projection, 2 a program's matrix at k
     int k = -1;
     if (s.vs_handle & 1) {
@@ -2515,9 +2515,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (kind == 2) std::memcpy(kept.data(), s.vsc[size_t(k)].data(), 64);
     for (int eye = 0; eye < 2; eye++) {
         SetEye(eye);
-        if (kind && vr::Eye(eye, turn, offset)) {
+        if (kind && vr::EyeShift(eye, turn, shift)) {
             if (kind == 1) {
-                const float b[16] = {turn[0], turn[1], turn[2], 0, turn[3], turn[4], turn[5], 0, turn[6], turn[7], turn[8], 0, -offset, 0, 0, 1};
+                const float b[16] = {turn[0], turn[1], turn[2], 0, turn[3], turn[4], turn[5], 0, turn[6], turn[7], turn[8], 0, -shift[0], -shift[1], -shift[2], 1};
                 float* out = m.transforms[3].data();
                 for (int r = 0; r < 4; r++)
                     for (int c = 0; c < 4; c++)
@@ -2534,7 +2534,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
                     for (int c = 0; c < 4; c++) v[0][c] = tx * r0[c], v[1][c] = ty * r1[c], v[2][c] = -r3[c];
                     for (int i = 0; i < 3; i++)
                         for (int c = 0; c < 4; c++) t[i][c] = turn[i] * v[0][c] + turn[3 + i] * v[1][c] + turn[6 + i] * v[2][c];
-                    t[0][3] -= offset;
+                    t[0][3] -= shift[0], t[1][3] -= shift[1], t[2][3] -= shift[2];
                     float* out = m.vsc[size_t(k)].data();
                     for (int c = 0; c < 4; c++) {
                         out[c] = t[0][c] / tx;

@@ -26,6 +26,9 @@ float EyeOffset(int eye);
 // both eyes). turn: the rotation from the title's camera to the head, 3x3 by rows, in the camera's own axes (x right, y
 // up, z towards the viewer); offset: EyeOffset.
 bool Eye(int eye, float turn[9], float& offset);
+// the same for the scene: shift is how far the eye stands from the title's camera in the head's axes, the head's own
+// movement from the middle included (leaning, ducking), in the title's units
+bool EyeShift(int eye, float turn[9], float shift[3]);
 bool Fov(float& tan_x, float& tan_y);  // the tangents of the half angles the frames are drawn at, once known
 
 // --- the title's thread ---
@@ -42,6 +45,8 @@ bool TitleTurn(float turn[9]);
 // the frame the title is building is drawn at this pitch after all (degrees, upwards), not the one Head gave: a title
 // whose camera did not follow
 void Pitch(float up);
+// degrees the title is to turn its camera by now, to the left positive: the right stick's steps (Settings::vr_snap_turn)
+float TakeTurn();
 void Hold();
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands

@@ -96,6 +96,9 @@ std::atomic<bool> g_failed{false}, g_running{false};
 std::mutex g_lock;
 bool g_head_valid = false;
 Pose g_head;
+XrVector3f g_origin{0, 0, 0};  // where the head is when the player stands at the title's camera (recentred: both sticks in)
+float g_screen_yaw = 0;        // the way the screen for menus and movies faces from there
+std::atomic<float> g_turn_pending{0};  // degrees of step turning the title has not taken yet, left positive
 bool g_hand_valid = false;  // the right hand's aim is tracked
 float g_hand_yaw = 0, g_hand_pitch = 0;
 // What each of the title's frames is drawn with, by its number (the count of presents before it): the title writes its
@@ -254,7 +257,9 @@ XrVector2f Vec(XrAction a, int hand, bool* active = nullptr) {
 void ReadControls() {
     using namespace input;
     float v[kControls] = {};
-    bool live = false;
+    bool live = false, recentre = false;
+    XrVector2f walk{0, 0};
+    float turn_stick = 0;
     XrActiveActionSet active{g_actions, XR_NULL_PATH};
     XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
     sync.countActiveActionSets = 1;
@@ -263,10 +268,23 @@ void ReadControls() {
         bool left_on = false, right_on = false;
         XrVector2f l = Vec(g_stick, 0, &left_on), r = Vec(g_stick, 1, &right_on);
         live = left_on || right_on;
-        v[kLSLeft] = std::max(-l.x, 0.0f), v[kLSRight] = std::max(l.x, 0.0f);
-        v[kLSUp] = std::max(l.y, 0.0f), v[kLSDown] = std::max(-l.y, 0.0f);
-        v[kRSLeft] = std::max(-r.x, 0.0f), v[kRSRight] = std::max(r.x, 0.0f);
+        walk = l;
+        // the right stick turns: smoothly through the title's own stick, or by steps (Settings::vr_snap_turn degrees), one a push
+        const float snap = float(app::Get().vr_snap_turn);
+        static int pushed = 0;
+        const int now = r.x < -0.6f ? -1 : r.x > 0.6f ? 1 : std::fabs(r.x) < 0.3f ? 0 : pushed;
+        if (snap > 0) {
+            if (now && now != pushed) g_turn_pending = g_turn_pending + (now < 0 ? snap : -snap);
+        } else {
+            turn_stick = r.x;
+        }
+        pushed = now;
         v[kY] = r.y > 0.7f;  // jump
+        // both sticks pressed in: the place and the way faced now are the middle again
+        static bool both = false;
+        const bool pressed = Bool(g_click, 0) && Bool(g_click, 1);
+        recentre = pressed && !both;
+        both = pressed;
         v[kLT] = Float(g_trigger, 0), v[kRT] = Float(g_trigger, 1);
         v[kX] = Float(g_grip, 0) > 0.35f;      // crouch
         v[kBlack] = Float(g_grip, 1) > 0.35f;  // alt. fire
@@ -289,6 +307,23 @@ void ReadControls() {
     if (aimed && !g_hand_valid) LOGR("vr: the right hand aims");
     g_hand_valid = aimed;
     if (aimed) Angles(aim.pose.orientation, g_hand_yaw, g_hand_pitch);
+    // Walking goes where the head faces. The title walks along its camera, which is the aiming hand's when that aims: the
+    // stick is turned by the angle between them. Its sticks (this renderer's titles so far, as Agent Under Fire's first
+    // setup): the left one forward and back and turning, the right one's x stepping aside.
+    float side = walk.x, ahead = walk.y;
+    if (app::Get().vr_hand_aim && g_hand_valid && g_head_valid) {
+        const float a = g_head.yaw - g_hand_yaw;
+        side = walk.x * std::cos(a) - walk.y * std::sin(a);
+        ahead = walk.x * std::sin(a) + walk.y * std::cos(a);
+    }
+    g_controls[kLSUp] = std::max(ahead, 0.0f), g_controls[kLSDown] = std::max(-ahead, 0.0f);
+    g_controls[kRSLeft] = std::max(-side, 0.0f), g_controls[kRSRight] = std::max(side, 0.0f);
+    g_controls[kLSLeft] = std::max(-turn_stick, 0.0f), g_controls[kLSRight] = std::max(turn_stick, 0.0f);
+    if (recentre && g_head_valid) {
+        g_origin = g_head.position;
+        g_screen_yaw = g_head.yaw;
+        LOGR("vr: recentred");
+    }
 }
 
 const char kCopyHlsl[] = R"(
@@ -631,6 +666,33 @@ bool Eye(int eye, float turn[9], float& offset) {
     return true;
 }
 
+bool EyeShift(int eye, float turn[9], float shift[3]) {
+    Pose pose;
+    XrVector3f origin;
+    {
+        std::lock_guard lock(g_lock);
+        pose = g_frames[g_render_frame % kFrames];
+        origin = g_origin;
+    }
+    if (!g_running || !pose.world) return false;
+    Turn(pose, turn);
+    // how far the head is from the middle, in the camera's axes, in the title's units
+    const float d[3] = {pose.position.x - origin.x, pose.position.y - origin.y, pose.position.z - origin.z};
+    const XrQuaternionf q = Level(pose.yaw, pose.pitch);
+    const float x = q.x, y = q.y, z = q.z, w = q.w;
+    const float g[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+                        2 * (y * z - x * w),     2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)};
+    const float units = float(app::Get().vr_units);
+    float t[3];
+    for (int i = 0; i < 3; i++) t[i] = (g[i] * d[0] + g[3 + i] * d[1] + g[6 + i] * d[2]) * units;
+    // seen from the head's own axes, and the eye to one side there
+    for (int i = 0; i < 3; i++) shift[i] = turn[i] * t[0] + turn[3 + i] * t[1] + turn[6 + i] * t[2];
+    shift[0] += EyeOffset(eye);
+    return true;
+}
+
+float TakeTurn() { return g_turn_pending.exchange(0); }
+
 bool TitleTurn(float turn[9]) {
     Pose pose;
     {
@@ -745,8 +807,14 @@ void Submit() {
             screen.space = g_local;
             screen.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             screen.subImage = {left.swap, {{0, 0}, {int32_t(left.w), int32_t(left.h)}}, 0};
-            screen.pose.orientation = {0, 0, 0, 1};
-            screen.pose.position = {0, 0, -kScreenDistance};
+            float yaw;
+            XrVector3f at;
+            {
+                std::lock_guard lock(g_lock);
+                yaw = g_screen_yaw, at = g_origin;
+            }
+            screen.pose.orientation = Level(yaw, 0);
+            screen.pose.position = {at.x - kScreenDistance * std::sin(yaw), at.y, at.z - kScreenDistance * std::cos(yaw)};
             screen.size = {kScreenWidth, kScreenWidth / aspect};
             layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&screen);
         }
