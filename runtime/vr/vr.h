@@ -68,6 +68,7 @@ bool CameraPitch(float& up);
 // its heading likewise, in degrees growing to the left, without a jump at a full turn; from where it starts is arbitrary
 bool CameraYaw(float& left);
 void Yaw(float left);   // as Pitch: the frame the title is building is drawn at this yaw
+void Rumble(uint16_t heavy, uint16_t light);  // controller 1's rumble, for the hand controllers (input::Rumble)
 float TurnStick();      // the right stick's x, -1 left to 1 right (0 while it turns by steps: TakeTurn)
 // A title that knows its own camera: the frame it is building is a view of the world from it. level turns the camera's
 // axes (x right, y up, z towards the viewer) to level ones of the same heading, 3x3 by rows (what Ahead finds from the

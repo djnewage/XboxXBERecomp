@@ -362,6 +362,7 @@ uint16_t HeldOnAnyController() {
 void Rumble(int port, uint16_t left, uint16_t right) {
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);
     if (port == 0) g_rumble[0] = left, g_rumble[1] = right;
+    if (port == 0) vr::Rumble(left, right);
     std::lock_guard lock(g_lock);
     if (port >= 0 && port < 4 && g_pads[port]) SDL_RumbleGamepad(g_pads[port], left, right, 0);
 }

@@ -66,6 +66,8 @@ constexpr uint32_t kMostImages = 16;
     X(xrGetActionStateBoolean)         \
     X(xrGetActionStateVector2f)        \
     X(xrCreateActionSpace)             \
+    X(xrApplyHapticFeedback)           \
+    X(xrStopHapticFeedback)            \
     X(xrEnumerateSwapchainFormats)     \
     X(xrCreateSwapchain)               \
     X(xrDestroySwapchain)              \
@@ -187,7 +189,9 @@ int g_given_kind = -1;
 // looks up and down) and jumps pushed up, the triggers are the triggers, the right hand's A and B the console's, its grip
 // Black; the left hand's A is White, its B Start, its grip X, its trackpad the d-pad.
 XrActionSet g_actions = XR_NULL_HANDLE;
-XrAction g_trigger, g_grip, g_a, g_b, g_stick, g_click, g_pad, g_pad_force, g_aim;
+XrAction g_trigger, g_grip, g_a, g_b, g_stick, g_click, g_pad, g_pad_force, g_aim, g_buzz;
+// the title's rumble for controller 1 (input::Rumble), its heavy motor and its light one, 0 to 1: the hand controllers buzz with it
+std::atomic<float> g_rumble_heavy{0}, g_rumble_light{0};
 XrSpace g_aim_space = XR_NULL_HANDLE;  // the right hand's aim
 XrPath g_hand[2];
 float g_controls[input::kControls] = {};  // g_lock
@@ -229,6 +233,7 @@ void CreateActions() {
     make(g_pad, XR_ACTION_TYPE_VECTOR2F_INPUT, "pad", "Trackpad");
     make(g_pad_force, XR_ACTION_TYPE_FLOAT_INPUT, "pad_force", "Trackpad press");
     make(g_aim, XR_ACTION_TYPE_POSE_INPUT, "aim", "Aim");
+    make(g_buzz, XR_ACTION_TYPE_VIBRATION_OUTPUT, "buzz", "Vibration");
     const auto suggest = [](const char* profile, std::vector<XrActionSuggestedBinding> b) {
         XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         sb.interactionProfile = Path(profile);
@@ -246,7 +251,8 @@ void CreateActions() {
              {g_click, Path("/user/hand/left/input/thumbstick/click")}, {g_click, Path("/user/hand/right/input/thumbstick/click")},
              {g_pad, Path("/user/hand/left/input/trackpad")}, {g_pad, Path("/user/hand/right/input/trackpad")},
              {g_pad_force, Path("/user/hand/left/input/trackpad/force")}, {g_pad_force, Path("/user/hand/right/input/trackpad/force")},
-             {g_aim, Path("/user/hand/right/input/aim/pose")}});
+             {g_aim, Path("/user/hand/right/input/aim/pose")},
+             {g_buzz, Path("/user/hand/left/output/haptic")}, {g_buzz, Path("/user/hand/right/output/haptic")}});
     suggest("/interaction_profiles/oculus/touch_controller",
             {{g_trigger, Path("/user/hand/left/input/trigger/value")}, {g_trigger, Path("/user/hand/right/input/trigger/value")},
              {g_grip, Path("/user/hand/left/input/squeeze/value")}, {g_grip, Path("/user/hand/right/input/squeeze/value")},
@@ -254,7 +260,8 @@ void CreateActions() {
              {g_b, Path("/user/hand/left/input/y/click")}, {g_b, Path("/user/hand/right/input/b/click")},
              {g_stick, Path("/user/hand/left/input/thumbstick")}, {g_stick, Path("/user/hand/right/input/thumbstick")},
              {g_click, Path("/user/hand/left/input/thumbstick/click")}, {g_click, Path("/user/hand/right/input/thumbstick/click")},
-             {g_aim, Path("/user/hand/right/input/aim/pose")}});
+             {g_aim, Path("/user/hand/right/input/aim/pose")},
+             {g_buzz, Path("/user/hand/left/output/haptic")}, {g_buzz, Path("/user/hand/right/output/haptic")}});
 }
 
 void AttachActions() {
@@ -339,6 +346,29 @@ void ReadControls() {
             XrVector2f d = Vec(g_pad, 0);
             if (std::fabs(d.x) > std::fabs(d.y)) v[d.x < 0 ? kLeft : kRight] = 1;
             else v[d.y > 0 ? kUp : kDown] = 1;
+        }
+    }
+    // The title's rumble: the right hand, which holds the gun, takes the stronger of the two motors, the left hand the
+    // heavy one alone. A short buzz renewed each frame while it lasts, so it ends with the rumble.
+    if (g_actions != XR_NULL_HANDLE) {
+        const float heavy = g_rumble_heavy, light = g_rumble_light;
+        const float amount[2] = {heavy, std::max(heavy, light)};
+        static bool buzzing[2] = {};
+        for (int hand = 0; hand < 2; hand++) {
+            XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+            info.action = g_buzz;
+            info.subactionPath = g_hand[hand];
+            if (amount[hand] > 0.02f) {
+                XrHapticVibration v{XR_TYPE_HAPTIC_VIBRATION};
+                v.duration = 50000000;  // 50 ms, in nanoseconds
+                v.frequency = XR_FREQUENCY_UNSPECIFIED;
+                v.amplitude = std::min(amount[hand], 1.0f);
+                xrApplyHapticFeedback(g_session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&v));
+                buzzing[hand] = true;
+            } else if (buzzing[hand]) {
+                xrStopHapticFeedback(g_session, &info);
+                buzzing[hand] = false;
+            }
         }
     }
     // where the right hand points
@@ -701,6 +731,7 @@ bool CameraYaw(float& left) {
     return g_camera_known;
 }
 float TurnStick() { return g_turn_stick; }
+void Rumble(uint16_t heavy, uint16_t light) { g_rumble_heavy = heavy / 65535.0f, g_rumble_light = light / 65535.0f; }
 void Yaw(float left) {
     std::lock_guard lock(g_lock);
     Pose& pose = g_frames[g_title_frame % kFrames];
