@@ -91,7 +91,9 @@ struct Pose {
     XrQuaternionf hand_q{0, 0, 0, 1};
     XrVector3f hand_at{0, 0, 0};
     XrVector3f position{0, 0, 0};
-    bool ahead = false;  // vr::Ahead: the title's own camera, levelled by g_level
+    bool ahead = false;  // vr::Ahead or View: the title's own camera, levelled by g_level, or by its own level
+    bool own_level = false;
+    float level[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     uint64_t at = 0;  // when the head was read for it (GetTickCount64), for the log
 };
 
@@ -165,6 +167,8 @@ std::atomic<bool> g_had_3d{true};
 // heading, 3x3 by rows, from the frame before's matrix (g_lock)
 float g_level[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 int g_up_axis = -1;
+float g_seen_axes[9] = {};  // the renderer's last reading of the camera (g_lock)
+bool g_seen_axes_known = false;
 std::atomic<float> g_camera_pitch{0}, g_camera_yaw{0}, g_turn_stick{0};
 std::atomic<bool> g_camera_known{false};
 std::vector<Seen> g_seen, g_seen_programs;  // the fixed function's projections, and vertex programs' (a title with no other)
@@ -707,6 +711,24 @@ bool CameraPitch(float& up) {
     return g_camera_known;
 }
 
+void View(const float level[9], bool own_yaw, float yaw) {
+    std::lock_guard lock(g_lock);
+    if (!g_running || !g_head_valid) return;
+    Pose pose = g_head;
+    pose.yaw = own_yaw ? yaw * kPi / 180 : g_screen_yaw;
+    pose.pitch = 0;
+    pose.ahead = pose.own_level = true;
+    std::memcpy(pose.level, level, sizeof(pose.level));
+    g_frames[g_title_frame % kFrames] = pose;
+    g_title_at = GetTickCount64();
+}
+bool SeenAxes(float axes[9]) {
+    std::lock_guard lock(g_lock);
+    std::memcpy(axes, g_seen_axes, sizeof(g_seen_axes));
+    return g_seen_axes_known;
+}
+uint64_t Ticks() { return GetTickCount64(); }
+
 void Hold() {
     std::lock_guard lock(g_lock);
     Pose& pose = g_frames[g_title_frame % kFrames];
@@ -777,7 +799,9 @@ void Turn(const Pose& pose, float turn[9]) {
     if (pose.ahead) {
         // from the camera's axes to the level ones first
         float level[9], r[9];
-        {
+        if (pose.own_level) {
+            std::memcpy(level, pose.level, sizeof(level));
+        } else {
             std::lock_guard lock(g_lock);
             std::memcpy(level, g_level, sizeof(level));
         }
@@ -924,6 +948,11 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
             };
             float right[3], up[3], ahead[3];
             unit(most->rows, right), unit(most->rows + 3, up), unit(most->rows + 6, ahead);
+            {
+                std::lock_guard lock(g_lock);
+                for (int i = 0; i < 3; i++) g_seen_axes[i] = right[i], g_seen_axes[3 + i] = up[i], g_seen_axes[6 + i] = ahead[i];
+                g_seen_axes_known = true;
+            }
             int k = 0;
             for (int i = 1; i < 3; i++)
                 if (std::fabs(up[i]) > std::fabs(up[k])) k = i;

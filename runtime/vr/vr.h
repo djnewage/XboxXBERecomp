@@ -69,6 +69,15 @@ bool CameraPitch(float& up);
 bool CameraYaw(float& left);
 void Yaw(float left);   // as Pitch: the frame the title is building is drawn at this yaw
 float TurnStick();      // the right stick's x, -1 left to 1 right (0 while it turns by steps: TakeTurn)
+// A title that knows its own camera: the frame it is building is a view of the world from it. level turns the camera's
+// axes (x right, y up, z towards the viewer) to level ones of the same heading, 3x3 by rows (what Ahead finds from the
+// renderer a frame late); the heading is the given yaw (degrees to the left, as Head's), or with own_yaw false the way
+// the player faced when recentred.
+void View(const float level[9], bool own_yaw, float yaw);
+// the camera as the renderer last read it from a vertex program's matrix: its right, its up and the way it looks, in
+// the world, three rows; false before any
+bool SeenAxes(float axes[9]);
+uint64_t Ticks();  // milliseconds, for a title's own pacing of what it asks
 void Hold();
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands
