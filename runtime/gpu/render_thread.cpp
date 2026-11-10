@@ -188,6 +188,8 @@ public:
 
     void Present(const Surface& front) override {
         auto t = Clock::now();
+        // the frame's last draws are a batch of their own: what waits for them does not wait for the present after them
+        if (!cur_->cmds.empty()) Submit();
         Cmd c{Op::Present};
         c.s1 = front;
         c.s1.header = Header(front.header);

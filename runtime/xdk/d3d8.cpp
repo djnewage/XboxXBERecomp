@@ -976,6 +976,7 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
     vr::TitlePresented();
     g_state.vr_frame = vr::TitleFrame();  // the draws from here are the next frame's
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+    vr::TitleWait();
     achievements::Frame();
     app::Pace(PresentVblanks());
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data

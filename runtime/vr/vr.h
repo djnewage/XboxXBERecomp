@@ -65,6 +65,9 @@ void Flat();            // the frames from here are not such a view (a menu, a c
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands
 bool Controls(float* v);
 void TitlePresented();
+// after the renderer's Present was asked for: waits for the headset's next frame, which paces the title, and reads the
+// head and the hand controllers for it
+void TitleWait();
 uint32_t TitleFrame();  // the number of the frame the title is building: the count of its Swaps  // each Swap, before the renderer's Present
 
 // --- the renderer's thread (gpu/d3d12.cpp) ---
@@ -72,10 +75,10 @@ void Start(ID3D12Device* device, ID3D12CommandQueue* queue);
 // each draw and clear: the title's frame it is of (gpu::State::vr_frame), whose pose the calls below use
 void RenderFrame(uint32_t frame);
 void NoteDraw(const gpu::State& s, uint32_t count);
-void NoteProgram(float tan_x, float tan_y, uint32_t count);  // the same for a vertex program's perspective  // each draw: the frame's projection is read from the scene's
+void NoteProgram(float tan_x, float tan_y, uint32_t count, const float* matrix);  // matrix: its four rows  // the same for a vertex program's perspective  // each draw: the frame's projection is read from the scene's
 // while the frame's command list is open, the finished frame a shader resource: copies it for the headset
 void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32_t width, uint32_t height);
 void Submit();  // once that list has been handed to the queue
-void Next();    // after the window's present: waits for the headset's next frame
+void Next();    // after the window's present: the session's events, the settings again
 
 }  // namespace vr

@@ -91,6 +91,7 @@ struct Pose {
     XrQuaternionf hand_q{0, 0, 0, 1};
     XrVector3f hand_at{0, 0, 0};
     XrVector3f position{0, 0, 0};
+    bool ahead = false;  // vr::Ahead: the title's own camera, levelled by g_level
     uint64_t at = 0;  // when the head was read for it (GetTickCount64), for the log
 };
 
@@ -125,8 +126,17 @@ XrSystemId g_system = XR_NULL_SYSTEM_ID;
 XrSession g_session = XR_NULL_HANDLE;
 XrSpace g_local = XR_NULL_HANDLE, g_view = XR_NULL_HANDLE;
 uint64_t g_retry_at = 0;
-bool g_begun = false, g_should_render = false;
-XrTime g_time = 0;
+bool g_begun = false, g_should_render = false;  // the renderer's: a waited frame is there for this present, and is to be drawn
+XrTime g_time = 0;                              // its display time
+// The headset's frames are waited for on the title's thread (TitleWait, at each Swap) and begun and ended on the
+// renderer's (Submit), which so never stands still: a title that waits for the renderer in the middle of a frame (a
+// buffer it locks again, twenty times a frame in a vent of Agent Under Fire) waited out the headset's wait with it.
+struct Waited {
+    XrTime time;
+    bool render;
+};
+std::deque<Waited> g_waited;  // g_lock
+XrTime g_title_time = 0;      // the title's thread: the frame it is building
 Pose g_shown;  // the pose of the frame being shown
 
 // a swap chain an eye: the left one alone shows a frame drawn once
@@ -145,7 +155,16 @@ std::atomic<float> g_half_ipd{0.0315f};  // metres, half the distance between th
 struct Seen {
     float x, y;  // the tangents of the half angles
     uint64_t vertices;
+    uint32_t biggest = 0;  // a program's: its largest draw, whose matrix rows (x, y and w) these are
+    float rows[9] = {};
 };
+// the last frame had a perspective in it: one without (a loading picture, a fade) is shown on the screen, whatever the
+// title asked, and its 2D is drawn as it comes
+std::atomic<bool> g_had_3d{true};
+// a camera the title keeps itself (vr::Ahead: a car's) is not level: the turn from its axes to level ones with the same
+// heading, 3x3 by rows, from the frame before's matrix (g_lock)
+float g_level[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+int g_up_axis = -1;
 std::vector<Seen> g_seen, g_seen_programs;  // the fixed function's projections, and vertex programs' (a title with no other)
 float g_tan_x = 0, g_tan_y = 0;
 float g_tan_try_x = 0, g_tan_try_y = 0;  // the last frames' own, taken once it has held a few frames
@@ -276,7 +295,7 @@ void ReadControls() {
     float v[kControls] = {};
     bool live = false, recentre = false;
     XrVector2f walk{0, 0};
-    float turn_stick = 0;
+    float turn_stick = 0, aim_y = 0;
     XrActiveActionSet active{g_actions, XR_NULL_PATH};
     XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
     sync.countActiveActionSets = 1;
@@ -297,6 +316,7 @@ void ReadControls() {
         }
         pushed = now;
         v[kY] = r.y > 0.7f;  // jump
+        aim_y = r.y;
         // both sticks pressed in: the place and the way faced now are the middle again
         static bool both = false;
         const bool pressed = Bool(g_click, 0) && Bool(g_click, 1);
@@ -317,7 +337,7 @@ void ReadControls() {
     }
     // where the right hand points
     XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
-    bool aimed = g_aim_space != XR_NULL_HANDLE && XR_SUCCEEDED(xrLocateSpace(g_aim_space, g_local, g_time, &aim)) &&
+    bool aimed = g_aim_space != XR_NULL_HANDLE && XR_SUCCEEDED(xrLocateSpace(g_aim_space, g_local, g_title_time, &aim)) &&
                  (aim.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && (aim.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT);
     std::lock_guard lock(g_lock);
     std::memcpy(g_controls, v, sizeof(v));
@@ -335,6 +355,9 @@ void ReadControls() {
         g_controls[kLSUp] = std::max(walk.y, 0.0f), g_controls[kLSDown] = std::max(-walk.y, 0.0f);
         g_controls[kLSLeft] = std::max(-walk.x, 0.0f), g_controls[kLSRight] = std::max(walk.x, 0.0f);
         g_controls[kRSLeft] = std::max(-turn_stick, 0.0f), g_controls[kRSRight] = std::max(turn_stick, 0.0f);
+        g_controls[kRSUp] = std::max(aim_y, 0.0f), g_controls[kRSDown] = std::max(-aim_y, 0.0f);
+        g_controls[kY] = 0;        // not a jump there
+        g_controls[kRThumb] = Bool(g_click, 1);
         if (recentre && g_head_valid) {
             g_origin = g_head.position;
             g_screen_yaw = g_head.yaw;
@@ -532,6 +555,7 @@ void PollEvents() {
                 g_running = false;
                 g_begun = false;
                 std::lock_guard lock(g_lock);
+                g_waited.clear();
                 g_head_valid = false;
             } else if (s.state == XR_SESSION_STATE_EXITING || s.state == XR_SESSION_STATE_LOSS_PENDING) {
                 DropSession("the runtime asked");
@@ -592,7 +616,7 @@ bool EnsureSwapchain(int eye, uint32_t w, uint32_t h) {
 // the head now, for the frame the title builds next
 void LocateHead() {
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-    bool ok = XR_SUCCEEDED(xrLocateSpace(g_view, g_local, g_time, &loc)) &&
+    bool ok = XR_SUCCEEDED(xrLocateSpace(g_view, g_local, g_title_time, &loc)) &&
               (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
     std::lock_guard lock(g_lock);
     g_head_valid = ok;
@@ -604,7 +628,7 @@ void LocateHead() {
     g_head.position = loc.pose.position;
     XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
     info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-    info.displayTime = g_time;
+    info.displayTime = g_title_time;
     info.space = g_view;
     XrViewState vs{XR_TYPE_VIEW_STATE};
     XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
@@ -670,18 +694,28 @@ void Ahead() {
     if (!g_running || !g_head_valid) return;
     Pose pose = g_head;
     pose.yaw = g_screen_yaw, pose.pitch = 0;
+    pose.ahead = true;
     g_frames[g_title_frame % kFrames] = pose;
     g_title_at = GetTickCount64();
 }
 
-void NoteProgram(float tan_x, float tan_y, uint32_t count) {
+void NoteProgram(float tan_x, float tan_y, uint32_t count, const float* m) {
     if (!g_running) return;
+    const auto keep = [&](Seen& seen) {
+        if (count <= seen.biggest) return;
+        seen.biggest = count;
+        for (int i = 0; i < 3; i++) seen.rows[i] = m[i], seen.rows[3 + i] = m[4 + i], seen.rows[6 + i] = m[12 + i];
+    };
     for (Seen& seen : g_seen_programs)
         if (std::fabs(seen.x - tan_x) < 1e-3f && std::fabs(seen.y - tan_y) < 1e-3f) {
             seen.vertices += count;
+            keep(seen);
             return;
         }
-    if (g_seen_programs.size() < 16) g_seen_programs.push_back({tan_x, tan_y, count});
+    if (g_seen_programs.size() < 16) {
+        g_seen_programs.push_back({tan_x, tan_y, count});
+        keep(g_seen_programs.back());
+    }
 }
 
 void Flat() {
@@ -699,7 +733,7 @@ uint32_t RenderHeight() { return Enabled() ? app::Get().vr_render_height : 0; }
 void TitlePresented() {
     std::lock_guard lock(g_lock);
     Pose next = g_frames[g_title_frame % kFrames];
-    if (!g_running || GetTickCount64() - g_title_at > 250) next = {};
+    if (!g_running || GetTickCount64() - g_title_at > 2000) next = {};  // (two seconds: a quarter was shorter than a hitch, and the view fell to the screen for a moment)
     g_frames[++g_title_frame % kFrames] = next;
 }
 
@@ -712,6 +746,17 @@ void Turn(const Pose& pose, float turn[9]) {
     turn[0] = 1 - 2 * (y * y + z * z), turn[1] = 2 * (x * y - z * w), turn[2] = 2 * (x * z + y * w);
     turn[3] = 2 * (x * y + z * w), turn[4] = 1 - 2 * (x * x + z * z), turn[5] = 2 * (y * z - x * w);
     turn[6] = 2 * (x * z - y * w), turn[7] = 2 * (y * z + x * w), turn[8] = 1 - 2 * (x * x + y * y);
+    if (pose.ahead) {
+        // from the camera's axes to the level ones first
+        float level[9], r[9];
+        {
+            std::lock_guard lock(g_lock);
+            std::memcpy(level, g_level, sizeof(level));
+        }
+        std::memcpy(r, turn, sizeof(r));
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) turn[i * 3 + j] = level[i * 3] * r[j] + level[i * 3 + 1] * r[3 + j] + level[i * 3 + 2] * r[6 + j];
+    }
 }
 }  // namespace
 
@@ -726,7 +771,7 @@ bool Eye(int eye, float turn[9], float& offset) {
         std::lock_guard lock(g_lock);
         pose = g_frames[g_render_frame % kFrames];
     }
-    if (!g_running || !pose.world) return false;
+    if (!g_running || !pose.world || !g_had_3d) return false;
     Turn(pose, turn);
     offset = EyeOffset(eye);
     return true;
@@ -740,7 +785,7 @@ bool EyeShift(int eye, float turn[9], float shift[3]) {
         pose = g_frames[g_render_frame % kFrames];
         origin = g_origin;
     }
-    if (!g_running || !pose.world) return false;
+    if (!g_running || !pose.world || !g_had_3d) return false;
     Turn(pose, turn);
     // how far the head is from the middle, in the camera's axes, in the title's units
     const float d[3] = {pose.position.x - origin.x, pose.position.y - origin.y, pose.position.z - origin.z};
@@ -791,7 +836,7 @@ bool TitleTurn(float turn[9]) {
         std::lock_guard lock(g_lock);
         pose = g_frames[g_title_frame % kFrames];
     }
-    if (!g_running || !pose.world) return false;
+    if (!g_running || !pose.world || !g_had_3d) return false;
     Turn(pose, turn);
     return true;
 }
@@ -840,11 +885,44 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
                 LOGR("vr: the scene's field of view %.1f by %.1f degrees", 2 * std::atan(g_tan_x) * 180 / kPi, 2 * std::atan(g_tan_y) * 180 / kPi);
             }
         }
+        g_had_3d = most != nullptr;
+        // A program's rows are the camera's right, up and (w) forward in the world. The world's up is the axis the camera's
+        // up lies along most; with it, the level frame of the same heading, seen from the camera's axes (x right, y up, z
+        // towards the viewer): y is the world's up, z what is left of the camera's own z, x across them.
+        if (most && g_seen.empty() && most->biggest) {
+            const auto unit = [](const float* r, float* o) {
+                const float l = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+                for (int i = 0; i < 3; i++) o[i] = l > 0 ? r[i] / l : 0;
+            };
+            float right[3], up[3], ahead[3];
+            unit(most->rows, right), unit(most->rows + 3, up), unit(most->rows + 6, ahead);
+            int k = 0;
+            for (int i = 1; i < 3; i++)
+                if (std::fabs(up[i]) > std::fabs(up[k])) k = i;
+            if (k != g_up_axis) LOGR("vr: the world's up is its %c axis (%s), from the camera's matrix", "xyz"[k], up[k] > 0 ? "positive" : "negative");
+            const float s = up[k] > 0 ? 1.0f : -1.0f;
+            float y[3] = {s * right[k], s * up[k], -s * ahead[k]}, z[3] = {0, 0, 1};
+            unit(y, y);
+            const float d = z[0] * y[0] + z[1] * y[1] + z[2] * y[2];
+            for (int i = 0; i < 3; i++) z[i] -= d * y[i];
+            if (std::sqrt(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]) > 0.2f) {
+                unit(z, z);
+                const float x[3] = {y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0]};
+                std::lock_guard lock(g_lock);
+                g_up_axis = k;
+                for (int i = 0; i < 3; i++) g_level[i * 3] = x[i], g_level[i * 3 + 1] = y[i], g_level[i * 3 + 2] = z[i];
+            }
+        }
         g_seen.clear();
         g_seen_programs.clear();
         std::lock_guard lock(g_lock);
         g_shown = g_frames[g_render_frame % kFrames];
         g_chain[0].drew = g_chain[1].drew = false;
+    }
+    if (eye == 0) {
+        std::lock_guard lock(g_lock);
+        g_begun = !g_waited.empty();
+        if (g_begun) g_should_render = g_waited.front().render, g_time = g_waited.front().time;
     }
     if (!g_begun || !g_should_render || !frame || !EnsureSwapchain(eye, width, height)) return;
     uint32_t index = 0;
@@ -919,11 +997,31 @@ void Report(int kind, bool finite, XrResult result) {
 }  // namespace
 
 void Submit() {
-    if (!g_begun) {
+    // every frame waited for is begun and ended, drawn or not: the title's next wait stands until this one is begun
+    bool have;
+    {
+        std::lock_guard lock(g_lock);
+        have = !g_waited.empty();
+        if (have) {
+            g_time = g_waited.front().time;
+            g_waited.pop_front();
+        }
+    }
+    if (!have || !g_running) {
         if (g_running) Report(-1, true, XR_SUCCESS);
         return;
     }
     g_begun = false;
+    if (XrResult b = xrBeginFrame(g_session, nullptr); XR_FAILED(b)) {
+        LOG_FIRST(8, "vr: the frame did not begin (%d)", int(b));
+        for (Chain& c : g_chain)
+            if (c.drew) {
+                XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                xrReleaseSwapchainImage(c.swap, &release);
+                c.drew = false;
+            }
+        return;
+    }
     XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     XrCompositionLayerProjection world{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerQuad screen{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -937,7 +1035,7 @@ void Submit() {
     if (g_chain[0].drew) {
         const Chain& left = g_chain[0];
         float aspect = float(left.w) / float(left.h);
-        if (g_shown.world) {
+        if (g_shown.world && g_had_3d) {
             // each eye's picture, drawn level from its place beside the head's; the left one for both when only it was drawn
             float ty = g_tan_y > 0 ? g_tan_y : std::tan(30 * kPi / 180), tx = g_tan_x > 0 ? g_tan_x : ty * aspect;
             bool both = g_chain[1].drew;
@@ -984,7 +1082,7 @@ void Submit() {
         const float values[] = {p.yaw, p.pitch, p.head.x, p.head.y, p.head.z, p.head.w, p.position.x, p.position.y, p.position.z, g_tan_x, g_tan_y};
         bool finite = true;
         for (float v : values) finite = finite && std::isfinite(v);
-        Report(count == 0 ? 0 : g_shown.world ? 2 : 1, finite, r);
+        Report(count == 0 ? 0 : g_shown.world && g_had_3d ? 2 : 1, finite, r);
     }
     g_chain[0].drew = g_chain[1].drew = false;
 }
@@ -1002,17 +1100,22 @@ void Next() {
         if (!CreateSession()) return;
     }
     PollEvents();
+}
+
+void TitleWait() {
     if (!g_running || g_session == XR_NULL_HANDLE) return;
     XrFrameState state{XR_TYPE_FRAME_STATE};
     XrResult r = xrWaitFrame(g_session, nullptr, &state);
-    if (XR_SUCCEEDED(r)) r = xrBeginFrame(g_session, nullptr);
     if (XR_FAILED(r)) {
-        LOG_FIRST(8, "vr: the frame did not begin (%d)", int(r));
+        LOG_FIRST(8, "vr: no frame to wait for (%d)", int(r));
         return;
     }
-    g_begun = true;
-    g_should_render = state.shouldRender;
-    g_time = state.predictedDisplayTime;
+    {
+        std::lock_guard lock(g_lock);
+        while (g_waited.size() >= 4) g_waited.pop_front();
+        g_waited.push_back({state.predictedDisplayTime, state.shouldRender != XR_FALSE});
+    }
+    g_title_time = state.predictedDisplayTime;
     LocateHead();
     ReadControls();
 }

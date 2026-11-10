@@ -1082,6 +1082,9 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
     t.sig = MemSig(slot.data, t.bytes);
+    // A headset's right eye: its targets are made after the left's, perhaps after the title painted a picture into the
+    // surface (a loading screen), and memory as it is must not count as seen: the first use takes the picture in
+    if (g_eye == 1) t.epoch = 0, t.sig = 0;
     auto& ref = targets_[slot.key] = std::move(t);
     targets_gen_++;
     return &ref;
@@ -2519,7 +2522,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         // its field of view, for the frame's (a title drawing all through programs gives no projection)
         const auto len = [](const float* r) { return std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]); };
         const float lw = len(&kept[12]), l0 = len(&kept[0]), l1 = len(&kept[4]);
-        if (lw > 1e-9f && l0 > 1e-9f && l1 > 1e-9f) vr::NoteProgram(lw / l0, lw / l1, count);
+        if (lw > 1e-9f && l0 > 1e-9f && l1 > 1e-9f) vr::NoteProgram(lw / l0, lw / l1, count, kept.data());
     }
     // What the title draws as held (State::held: a first person weapon, where its camera has it) goes to the aiming hand
     // first: the point of it that is the grip (Settings::vr_gun) to where the hand is, turned as the hand is (its roll:
