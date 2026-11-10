@@ -137,6 +137,10 @@ struct DrawConstants {
     float hud[4];        // pretransformed x squeezed about hud[1] (half the width) by hud[0] (ultrawide 2D), else 1;
                          // [2] depth tested; [3] W-buffered: z kept within w (no far plane clipping)
     float pts[4];        // point sprites on, size min, size max, D3DRS_POINTSIZE (console pixels)
+    // a headset's 2D ([3][1] set): the frame's 2D stands on a plane ahead of the title's camera, seen from the eye.
+    // [0..2].xyz the columns of the turn from that camera to the head, [0].w and [1].w the frame's tangents (half
+    // angles), [2].w the plane's distance, [3].x the eye's offset, [3].z the frame's size on the plane (1 as drawn)
+    float vr2d[4][4];
 };
 
 }  // namespace gpu

@@ -53,6 +53,8 @@ struct Settings {
     bool world_textures = false;     // the 3D scene's colour textures enlarged twice on a background thread
     bool low_latency = false;        // a waitable swap chain holding one frame, at the next start
     uint32_t vr_units = 32;          // the title's units in a metre, for the distance between the eyes (GameInfo may set it)
+    uint32_t vr_hud_distance = 300;  // centimetres from the head to the HUD and the crosshair
+    bool vr_hand_aim = true;         // in a headset the right hand aims the view the title shoots along, not the head
     bool vr = false;                 // a headset through OpenXR (vr/vr.h), Direct3D 12 only, at the next start
     uint32_t sharpen = 0;            // percent, contrast adaptive sharpening of the finished frame
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start

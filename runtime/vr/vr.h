@@ -22,12 +22,21 @@ bool Running();  // a session is showing frames: the headset paces the title
 bool Stereo();   // the renderer draws everything twice, a picture an eye
 // how far to the right of the head an eye is (0 left, 1 right), in the title's units (Settings::vr_units a metre)
 float EyeOffset(int eye);
+// The renderer's, for the frame it is drawing: false when it is not a view of the world (drawn as it comes, the same for
+// both eyes). turn: the rotation from the title's camera to the head, 3x3 by rows, in the camera's own axes (x right, y
+// up, z towards the viewer); offset: EyeOffset.
+bool Eye(int eye, float turn[9], float& offset);
+bool Fov(float& tan_x, float& tan_y);  // the tangents of the half angles the frames are drawn at, once known
 
 // --- the title's thread ---
-// The head's angles in degrees for the frame the title is about to build: yaw grows to the left, pitch upwards, both 0
-// looking ahead as the session started. Asking marks the frames from here as views of the world drawn at these angles
+// The angles in degrees the title is to draw the frame it is about to build at: the aiming hand's when one is tracked
+// (Settings::vr_hand_aim), else the head's; yaw grows to the left, pitch upwards, both 0 looking ahead as the session
+// started. The renderer turns the picture from them to the head. Asking marks the frames from here as views of the world drawn at these angles
 // (level, no roll), until Flat or a quarter of a second without asking. False without a headset to ask.
 bool Head(float& yaw, float& pitch);
+// the title's camera stands still (a level paused): its frames stay views of the world at the angles last asked for,
+// seen from where the head is now
+void Hold();
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands
 bool Controls(float* v);

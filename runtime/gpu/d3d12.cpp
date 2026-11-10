@@ -2482,44 +2482,73 @@ void D3D12Backend::DeliverReports() {
     }
 }
 
-// A headset's two pictures: each eye stands to one side of the title's camera, so what the camera sees moves the other way
-// by that much (vr::EyeOffset, in the title's units) before the projection. Fixed function: the projection's fourth row
-// takes it (x' = x - e in view space is P[3][0] -= e * P[0][0], row vectors). A vertex program multiplying its position by
-// four constants (gpu::MatrixProgram), a perspective there: its x row's constant term, by that row's length (the
-// projection's x scale, for a model drawn at its own size). 2D is left where it is. The state is put back after the draw.
+// A headset's two pictures of a frame that is a view of the world (vr::Eye). The title drew at its camera; each eye is the
+// head's, turned from that camera by `turn`, then to one side by the eye's offset. With v the position in the camera's
+// space (x right, y up, looking along -z, as this renderer's titles so far), the eye's is v * turn (row vectors), x less
+// the offset.
+// Fixed function: the projection becomes B * P, B the turn with the offset in its fourth row.
+// A vertex program multiplying its position by four constants (gpu::MatrixProgram), a perspective: its rows give the
+// camera's space back (x = row 0 over its length times the w row's, y likewise, z = -w), which is turned and moved the
+// same way and put together again; the depth row is the same function of z as before.
+// 2D is left where it is. The state is put back after the draw.
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     if (!vr::Stereo()) return DrawEye(s, prim, start, count, indices);
     State& m = const_cast<State&>(s);
-    float* slot = nullptr;
-    float scale = 0;
+    float turn[9], offset = 0;
+    int kind = 0;  // 1 the projection, 2 a program's matrix at k
+    int k = -1;
     if (s.vs_handle & 1) {
         if (s.vs) {
             if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
-            const int k = s.vs->matrix;
+            k = s.vs->matrix;
             if (k >= 0 && k + 3 < 192 && !OrthoConstants(s.vsc, k)) {
-                const auto& x = s.vsc[size_t(k)];
                 const auto& w = s.vsc[size_t(k) + 3];
-                // a perspective: w follows the position
-                if (std::fabs(w[0]) + std::fabs(w[1]) + std::fabs(w[2]) > 1e-6f) {
-                    slot = &m.vsc[size_t(k)][3];
-                    scale = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
-                }
+                if (std::fabs(w[0]) + std::fabs(w[1]) + std::fabs(w[2]) > 1e-6f) kind = 2;  // a perspective: w follows the position
             }
         }
     } else if ((s.vs_handle & 0xE) != 0x4) {
         const float* pj = s.transforms[3].data();
-        if (std::fabs(std::fabs(pj[11]) - 1) < 1e-3f && std::fabs(pj[15]) < 1e-3f) {
-            slot = &m.transforms[3][12];
-            scale = pj[0];
-        }
+        if (std::fabs(std::fabs(pj[11]) - 1) < 1e-3f && std::fabs(pj[15]) < 1e-3f) kind = 1;
     }
-    const float kept = slot ? *slot : 0;
+    std::array<float, 16> kept{};
+    if (kind == 1) kept = s.transforms[3];
+    if (kind == 2) std::memcpy(kept.data(), s.vsc[size_t(k)].data(), 64);
     for (int eye = 0; eye < 2; eye++) {
         SetEye(eye);
-        if (slot) *slot = kept - vr::EyeOffset(eye) * scale;
+        if (kind && vr::Eye(eye, turn, offset)) {
+            if (kind == 1) {
+                const float b[16] = {turn[0], turn[1], turn[2], 0, turn[3], turn[4], turn[5], 0, turn[6], turn[7], turn[8], 0, -offset, 0, 0, 1};
+                float* out = m.transforms[3].data();
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++)
+                        out[r * 4 + c] = b[r * 4] * kept[c] + b[r * 4 + 1] * kept[4 + c] + b[r * 4 + 2] * kept[8 + c] + b[r * 4 + 3] * kept[12 + c];
+            } else {
+                const float *r0 = &kept[0], *r1 = &kept[4], *r2 = &kept[8], *r3 = &kept[12];
+                const auto len = [](const float* r) { return std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]); };
+                const float lw = len(r3), l0 = len(r0), l1 = len(r1);
+                if (lw > 1e-9f && l0 > 1e-9f && l1 > 1e-9f) {
+                    const float tx = lw / l0, ty = lw / l1;  // the tangents of the half angles
+                    // depth = da * z + db, as the rows have it (z = -w)
+                    const float da = -(r2[0] * r3[0] + r2[1] * r3[1] + r2[2] * r3[2]) / (lw * lw), db = r2[3] + da * r3[3];
+                    float v[3][4], t[3][4];
+                    for (int c = 0; c < 4; c++) v[0][c] = tx * r0[c], v[1][c] = ty * r1[c], v[2][c] = -r3[c];
+                    for (int i = 0; i < 3; i++)
+                        for (int c = 0; c < 4; c++) t[i][c] = turn[i] * v[0][c] + turn[3 + i] * v[1][c] + turn[6 + i] * v[2][c];
+                    t[0][3] -= offset;
+                    float* out = m.vsc[size_t(k)].data();
+                    for (int c = 0; c < 4; c++) {
+                        out[c] = t[0][c] / tx;
+                        out[4 + c] = t[1][c] / ty;
+                        out[8 + c] = da * t[2][c] + (c == 3 ? db : 0);
+                        out[12 + c] = -t[2][c];
+                    }
+                }
+            }
+        }
         DrawEye(s, prim, start, count, indices);
+        if (kind == 1) m.transforms[3] = kept;
+        if (kind == 2) std::memcpy(m.vsc[size_t(k)].data(), kept.data(), 64);
     }
-    if (slot) *slot = kept;
     SetEye(0);
 }
 
@@ -2633,6 +2662,25 @@ void D3D12Backend::DrawEye(const State& s, uint32_t prim, uint32_t start, uint32
                     XStretch(bound_rt_->gw, bound_rt_->gh), c.hud[0]);
     c.hud[1] = guest_w_ * 0.5f;
     if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f / s.aa_x;
+    // A headset: the frame's 2D (the HUD, the crosshair at its middle) stands on a plane some metres (Settings::vr_hud_distance) ahead of the title's
+    // camera, which is where the gun points, and each eye sees it from where the head is. Not what fills the frame (a
+    // fade, a flash, a cut scene's bars), nor 2D drawn into another target.
+    std::memset(c.vr2d, 0, sizeof(c.vr2d));
+    float turn[9], offset = 0, tx = 0, ty = 0;
+    if (draw_2d_ && bound_rt_ && bound_rt_->gw == guest_w_ && bound_rt_->gh == guest_h_ && vr::Eye(g_eye, turn, offset) &&
+        vr::Fov(tx, ty) && DrawSpan(s, a, c.hud[1] * 2) == kSpanNone) {
+        // what is at the frame's middle is the crosshair: it goes where the gun points. The rest of the HUD stays ahead of
+        // the head, half its size, so its corners can be read without looking away
+        const float w = c.hud[1] * 2, h = float(bound_rt_->gh) / s.aa_y;
+        const bool crosshair = DrawWithin(s, a, w * 0.36f, w * 0.64f, h * 0.36f, h * 0.64f);
+        if (!crosshair) {
+            const float same[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+            std::memcpy(turn, same, sizeof(turn));
+        }
+        for (int j = 0; j < 3; j++) c.vr2d[j][0] = turn[j], c.vr2d[j][1] = turn[3 + j], c.vr2d[j][2] = turn[6 + j];
+        c.vr2d[0][3] = tx, c.vr2d[1][3] = ty, c.vr2d[2][3] = float(app::Get().vr_hud_distance) / 100 * float(app::Get().vr_units);
+        c.vr2d[3][0] = offset, c.vr2d[3][1] = 1, c.vr2d[3][2] = crosshair ? 1.0f : 0.5f;
+    }
     if (c.hud[0] != 1 && !s.squeeze_beyond) {
         Span span = DrawSpan(s, a, c.hud[1] * 2);
         if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole

@@ -65,6 +65,7 @@ constexpr uint32_t kMostImages = 16;
     X(xrGetActionStateFloat)           \
     X(xrGetActionStateBoolean)         \
     X(xrGetActionStateVector2f)        \
+    X(xrCreateActionSpace)             \
     X(xrEnumerateSwapchainFormats)     \
     X(xrCreateSwapchain)               \
     X(xrDestroySwapchain)              \
@@ -83,8 +84,9 @@ PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr = nullptr;
 
 // what the title drew a frame with
 struct Pose {
-    bool world = false;  // a view of the world at these angles, else a picture for the screen
-    float yaw = 0, pitch = 0;  // radians
+    bool world = false;  // a view of the world, else a picture for the screen
+    float yaw = 0, pitch = 0;  // radians: the angles the title drew it at (level), the head's or the aiming hand's
+    XrQuaternionf head{0, 0, 0, 1};  // where the head looked then: the picture is turned to it by the renderer
     XrVector3f position{0, 0, 0};
 };
 
@@ -94,9 +96,15 @@ std::atomic<bool> g_failed{false}, g_running{false};
 std::mutex g_lock;
 bool g_head_valid = false;
 Pose g_head;
-Pose g_title;              // what the title last asked for: its frames are drawn with it until it says otherwise
-uint64_t g_title_at = 0;    // when (GetTickCount64): a title that stops saying has no such view any more
-std::deque<Pose> g_poses;  // one per title frame presented, in order
+bool g_hand_valid = false;  // the right hand's aim is tracked
+float g_hand_yaw = 0, g_hand_pitch = 0;
+// What each of the title's frames is drawn with, by its number (the count of presents before it): the title writes its
+// frame's when it asks for the angles, before it draws; the renderer reads the one of the frame it is drawing, by its
+// own count of presents. A frame the title does not ask in again is drawn with the one before's.
+constexpr uint64_t kFrames = 16;
+Pose g_frames[kFrames];
+uint64_t g_title_frame = 0, g_render_frame = 0;
+uint64_t g_title_at = 0;    // when the title last asked (GetTickCount64): one that stops asking has no such view any more
 
 // --- the renderer's thread from here ---
 ID3D12Device* g_device = nullptr;
@@ -134,11 +142,13 @@ float g_tan_x = 0, g_tan_y = 0;
 // looks up and down) and jumps pushed up, the triggers are the triggers, the right hand's A and B the console's, its grip
 // Black; the left hand's A is White, its B Start, its grip X, its trackpad the d-pad.
 XrActionSet g_actions = XR_NULL_HANDLE;
-XrAction g_trigger, g_grip, g_a, g_b, g_stick, g_click, g_pad, g_pad_force;
+XrAction g_trigger, g_grip, g_a, g_b, g_stick, g_click, g_pad, g_pad_force, g_aim;
+XrSpace g_aim_space = XR_NULL_HANDLE;  // the right hand's aim
 XrPath g_hand[2];
 float g_controls[input::kControls] = {};  // g_lock
 bool g_controls_live = false;
 
+void Angles(const XrQuaternionf& q, float& yaw, float& pitch);
 XrPath Path(const char* text) {
     XrPath p = XR_NULL_PATH;
     xrStringToPath(g_instance, text, &p);
@@ -173,6 +183,7 @@ void CreateActions() {
     make(g_click, XR_ACTION_TYPE_BOOLEAN_INPUT, "stick_click", "Stick click");
     make(g_pad, XR_ACTION_TYPE_VECTOR2F_INPUT, "pad", "Trackpad");
     make(g_pad_force, XR_ACTION_TYPE_FLOAT_INPUT, "pad_force", "Trackpad press");
+    make(g_aim, XR_ACTION_TYPE_POSE_INPUT, "aim", "Aim");
     const auto suggest = [](const char* profile, std::vector<XrActionSuggestedBinding> b) {
         XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         sb.interactionProfile = Path(profile);
@@ -189,14 +200,16 @@ void CreateActions() {
              {g_stick, Path("/user/hand/left/input/thumbstick")}, {g_stick, Path("/user/hand/right/input/thumbstick")},
              {g_click, Path("/user/hand/left/input/thumbstick/click")}, {g_click, Path("/user/hand/right/input/thumbstick/click")},
              {g_pad, Path("/user/hand/left/input/trackpad")}, {g_pad, Path("/user/hand/right/input/trackpad")},
-             {g_pad_force, Path("/user/hand/left/input/trackpad/force")}, {g_pad_force, Path("/user/hand/right/input/trackpad/force")}});
+             {g_pad_force, Path("/user/hand/left/input/trackpad/force")}, {g_pad_force, Path("/user/hand/right/input/trackpad/force")},
+             {g_aim, Path("/user/hand/right/input/aim/pose")}});
     suggest("/interaction_profiles/oculus/touch_controller",
             {{g_trigger, Path("/user/hand/left/input/trigger/value")}, {g_trigger, Path("/user/hand/right/input/trigger/value")},
              {g_grip, Path("/user/hand/left/input/squeeze/value")}, {g_grip, Path("/user/hand/right/input/squeeze/value")},
              {g_a, Path("/user/hand/left/input/x/click")}, {g_a, Path("/user/hand/right/input/a/click")},
              {g_b, Path("/user/hand/left/input/y/click")}, {g_b, Path("/user/hand/right/input/b/click")},
              {g_stick, Path("/user/hand/left/input/thumbstick")}, {g_stick, Path("/user/hand/right/input/thumbstick")},
-             {g_click, Path("/user/hand/left/input/thumbstick/click")}, {g_click, Path("/user/hand/right/input/thumbstick/click")}});
+             {g_click, Path("/user/hand/left/input/thumbstick/click")}, {g_click, Path("/user/hand/right/input/thumbstick/click")},
+             {g_aim, Path("/user/hand/right/input/aim/pose")}});
 }
 
 void AttachActions() {
@@ -207,6 +220,11 @@ void AttachActions() {
     XrResult r = xrAttachSessionActionSets(g_session, &attach);
     if (XR_FAILED(r)) LOGR("vr: the hand controllers' actions were not attached (%d)", int(r));
     else LOGR("vr: the hand controllers play controller 1");
+    XrActionSpaceCreateInfo space{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    space.action = g_aim;
+    space.subactionPath = g_hand[1];
+    space.poseInActionSpace.orientation = {0, 0, 0, 1};
+    if (XR_FAILED(xrCreateActionSpace(g_session, &space, &g_aim_space))) g_aim_space = XR_NULL_HANDLE;
 }
 
 float Float(XrAction a, int hand) {
@@ -261,9 +279,16 @@ void ReadControls() {
             else v[d.y > 0 ? kUp : kDown] = 1;
         }
     }
+    // where the right hand points
+    XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
+    bool aimed = g_aim_space != XR_NULL_HANDLE && XR_SUCCEEDED(xrLocateSpace(g_aim_space, g_local, g_time, &aim)) &&
+                 (aim.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && (aim.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT);
     std::lock_guard lock(g_lock);
     std::memcpy(g_controls, v, sizeof(v));
     g_controls_live = live;
+    if (aimed && !g_hand_valid) LOGR("vr: the right hand aims");
+    g_hand_valid = aimed;
+    if (aimed) Angles(aim.pose.orientation, g_hand_yaw, g_hand_pitch);
 }
 
 const char kCopyHlsl[] = R"(
@@ -315,15 +340,14 @@ void DropSession(const char* why) {
     if (g_view != XR_NULL_HANDLE) xrDestroySpace(g_view);
     if (g_local != XR_NULL_HANDLE) xrDestroySpace(g_local);
     if (g_session != XR_NULL_HANDLE) xrDestroySession(g_session);
-    g_view = g_local = XR_NULL_HANDLE;
+    g_view = g_local = g_aim_space = XR_NULL_HANDLE;
     g_session = XR_NULL_HANDLE;
     g_system = XR_NULL_SYSTEM_ID;
     g_begun = false;
     g_running = false;
     {
         std::lock_guard lock(g_lock);
-        g_head_valid = false;
-        g_poses.clear();
+        g_head_valid = g_hand_valid = false;
     }
     g_retry_at = GetTickCount64() + kRetryMs;
 }
@@ -508,6 +532,7 @@ void LocateHead() {
     if (!ok) return;
     g_head.world = true;
     Angles(loc.pose.orientation, g_head.yaw, g_head.pitch);
+    g_head.head = loc.pose.orientation;
     g_head.position = loc.pose.position;
     XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
     info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -540,23 +565,61 @@ bool Controls(float* v) {
 bool Head(float& yaw, float& pitch) {
     std::lock_guard lock(g_lock);
     if (!g_running || !g_head_valid) return false;
-    g_title = g_head;
+    Pose pose = g_head;
+    // the gun in the right hand aims, when it is tracked: the title turns to it, the picture stays with the head
+    if (app::Get().vr_hand_aim && g_hand_valid) pose.yaw = g_hand_yaw, pose.pitch = g_hand_pitch;
+    g_frames[g_title_frame % kFrames] = pose;
     g_title_at = GetTickCount64();
-    yaw = g_head.yaw * 180 / kPi;
-    pitch = g_head.pitch * 180 / kPi;
+    yaw = pose.yaw * 180 / kPi;
+    pitch = pose.pitch * 180 / kPi;
     return true;
+}
+
+void Hold() {
+    std::lock_guard lock(g_lock);
+    Pose& pose = g_frames[g_title_frame % kFrames];
+    if (!g_running || !g_head_valid || !pose.world) return;
+    pose.head = g_head.head;
+    pose.position = g_head.position;
+    g_title_at = GetTickCount64();
 }
 
 void Flat() {
     std::lock_guard lock(g_lock);
-    g_title = {};
+    g_frames[g_title_frame % kFrames] = {};
 }
 
 void TitlePresented() {
-    if (!g_running) return;
     std::lock_guard lock(g_lock);
-    if (GetTickCount64() - g_title_at > 250) g_title = {};
-    if (g_poses.size() < 8) g_poses.push_back(g_title);
+    Pose next = g_frames[g_title_frame % kFrames];
+    if (!g_running || GetTickCount64() - g_title_at > 250) next = {};
+    g_frames[++g_title_frame % kFrames] = next;
+}
+
+namespace {
+XrQuaternionf Conj(const XrQuaternionf& q) { return {-q.x, -q.y, -q.z, q.w}; }
+}  // namespace
+
+bool Fov(float& tan_x, float& tan_y) {
+    tan_x = g_tan_x, tan_y = g_tan_y;  // the renderer's own thread
+    return tan_x > 0 && tan_y > 0;
+}
+
+bool Eye(int eye, float turn[9], float& offset) {
+    Pose pose;
+    {
+        std::lock_guard lock(g_lock);
+        pose = g_frames[g_render_frame % kFrames];
+    }
+    if (!g_running || !pose.world) return false;
+    // from the title's camera to the head
+    const XrQuaternionf q = Mul(Conj(Level(pose.yaw, pose.pitch)), pose.head);
+    const float x = q.x, y = q.y, z = q.z, w = q.w;
+    turn[0] = 1 - 2 * (y * y + z * z), turn[1] = 2 * (x * y - z * w), turn[2] = 2 * (x * z + y * w);
+    turn[3] = 2 * (x * y + z * w), turn[4] = 1 - 2 * (x * x + z * z), turn[5] = 2 * (y * z - x * w);
+    turn[6] = 2 * (x * z - y * w), turn[7] = 2 * (y * z + x * w), turn[8] = 1 - 2 * (x * x + y * y);
+    offset = EyeOffset(eye);
+    return true;
 }
 
 void Start(ID3D12Device* device, ID3D12CommandQueue* queue) {
@@ -597,10 +660,7 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
         }
         g_seen.clear();
         std::lock_guard lock(g_lock);
-        if (!g_poses.empty()) {
-            g_shown = g_poses.front();
-            g_poses.pop_front();
-        }
+        g_shown = g_frames[g_render_frame % kFrames];
         g_chain[0].drew = g_chain[1].drew = false;
     }
     if (!g_begun || !g_should_render || !frame || !EnsureSwapchain(eye, width, height)) return;
@@ -625,6 +685,7 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
 }
 
 void Submit() {
+    g_render_frame++;  // every present, as the title counts its own
     if (!g_begun) return;
     g_begun = false;
     XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
@@ -647,9 +708,12 @@ void Submit() {
             for (int i = 0; i < 2; i++) {
                 const Chain& c = g_chain[both ? i : 0];
                 float side = both ? (i ? 1.0f : -1.0f) * g_half_ipd : 0;
-                views[i].pose.orientation = Level(g_shown.yaw, g_shown.pitch);
-                views[i].pose.position = {g_shown.position.x + side * std::cos(g_shown.yaw), g_shown.position.y,
-                                          g_shown.position.z - side * std::sin(g_shown.yaw)};
+                const XrQuaternionf& h = g_shown.head;
+                // the head's right: its orientation turning +x
+                const XrVector3f right{1 - 2 * (h.y * h.y + h.z * h.z), 2 * (h.x * h.y + h.z * h.w), 2 * (h.x * h.z - h.y * h.w)};
+                views[i].pose.orientation = h;
+                views[i].pose.position = {g_shown.position.x + side * right.x, g_shown.position.y + side * right.y,
+                                          g_shown.position.z + side * right.z};
                 views[i].fov = {-std::atan(tx), std::atan(tx), std::atan(ty), -std::atan(ty)};
                 views[i].subImage = {c.swap, {{0, 0}, {int32_t(c.w), int32_t(c.h)}}, 0};
             }

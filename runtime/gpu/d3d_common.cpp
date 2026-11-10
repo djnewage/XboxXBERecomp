@@ -859,6 +859,32 @@ bool ScreenDraw(const State& s) {
     return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
 }
 
+bool DrawWithin(const State& s, const Assembled& a, float x0, float x1, float y0, float y1) {
+    const int regs = std::popcount(uint32_t(a.regs));
+    const VertexElement& e = a.elements[0];
+    const VertexBuffer& b = a.buffers[e.buffer];
+    const bool converted = !a.vertices.empty();
+    uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
+    if (!(a.regs & 1) || !count) return false;
+    if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
+                                  e.format != DXGI_FORMAT_R32G32_FLOAT)))
+        return false;
+    const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
+    if (program && s.vs->screen != 1) return false;  // through a matrix: not asked yet
+    count = std::min<uint32_t>(count, 4096);
+    for (uint32_t i = 0; i < count; i++) {
+        float p[4] = {0, 0, 0, 1};
+        if (converted) {
+            std::memcpy(p, &a.vertices[size_t(i) * size_t(regs) * 4], sizeof p);
+        } else {
+            size_t n = e.format == DXGI_FORMAT_R32G32_FLOAT ? 2 : e.format == DXGI_FORMAT_R32G32B32_FLOAT ? 3 : 4;
+            std::memcpy(p, b.src + size_t(i) * b.stride + e.offset, n * 4);
+        }
+        if (p[0] < x0 || p[0] > x1 || p[1] < y0 || p[1] > y1) return false;
+    }
+    return true;
+}
+
 Span DrawSpan(const State& s, const Assembled& a, float width) {
     constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer

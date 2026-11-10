@@ -63,6 +63,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 wdepth;
     float4 hud;
     float4 pts;  // point sprites on, size min, size max, D3DRS_POINTSIZE
+    float4 vr2d[4];  // DrawConstants::vr2d
 };
 )";
 
@@ -241,9 +242,17 @@ const char* kVsEpilogue = R"(
     // W-buffered (hud.w): the pixel shader writes the depth from w and the console clips nothing past the far plane,
     // so z stays within w here: PGR2's sky dome and far hills lie past it and were clipped away (Nurburgring)
     if (hud.w != 0) q.z = min(q.z, 1.0);
-    q.xyz *= p.w;
-    q.w = p.w;
-    o.pos = q;
+    if (vr2d[3].y != 0) {
+        // where it is on the frame, as a point of the plane; then as the eye sees that point
+        float3 v = float3(q.x * vr2d[0].w * vr2d[3].z, q.y * vr2d[1].w * vr2d[3].z, -1) * vr2d[2].w;
+        float3 e = float3(dot(v, vr2d[0].xyz), dot(v, vr2d[1].xyz), dot(v, vr2d[2].xyz));
+        e.x -= vr2d[3].x;
+        o.pos = float4(e.x / vr2d[0].w, e.y / vr2d[1].w, q.z * -e.z, -e.z);
+    } else {
+        q.xyz *= p.w;
+        q.w = p.w;
+        o.pos = q;
+    }
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = saturate(oB0);

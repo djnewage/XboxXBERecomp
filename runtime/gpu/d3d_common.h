@@ -185,6 +185,8 @@ float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch
 // whole
 enum Span { kSpanNone, kSpanFrame, kSpanViewport };
 Span DrawSpan(const State& s, const Assembled& a, float width);
+// a 2D draw given in screen positions lies wholly inside the box (guest pixels): a headset's crosshair, at the middle
+bool DrawWithin(const State& s, const Assembled& a, float x0, float x1, float y0, float y1);
 // State::squeeze_beyond: hud[0] negative (the shader keeps no corner on an edge) and the pivot hud[1] moved so the
 // squeeze also moves the draw by squeeze_shift
 void SqueezeBeyond(const State& s, float hud[4]);
