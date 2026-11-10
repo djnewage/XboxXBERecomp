@@ -165,6 +165,8 @@ std::atomic<bool> g_had_3d{true};
 // heading, 3x3 by rows, from the frame before's matrix (g_lock)
 float g_level[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 int g_up_axis = -1;
+std::atomic<float> g_camera_pitch{0}, g_camera_yaw{0}, g_turn_stick{0};
+std::atomic<bool> g_camera_known{false};
 std::vector<Seen> g_seen, g_seen_programs;  // the fixed function's projections, and vertex programs' (a title with no other)
 float g_tan_x = 0, g_tan_y = 0;
 float g_tan_try_x = 0, g_tan_try_y = 0;  // the last frames' own, taken once it has held a few frames
@@ -349,6 +351,7 @@ void ReadControls() {
     // Walking goes where the head faces. The title walks along its camera, which is the aiming hand's when that aims: the
     // stick is turned by the angle between them. Its sticks (this renderer's titles so far, as Agent Under Fire's first
     // setup): the left one forward and back and turning, the right one's x stepping aside.
+    g_turn_stick = turn_stick;
     float side = walk.x, ahead = walk.y;
     if (g_layout == 1) {
         // a title steered with the left stick (driving): the sticks as they are, the right one's x the turning stick's read
@@ -371,8 +374,14 @@ void ReadControls() {
         ahead = walk.x * std::sin(a) + walk.y * std::cos(a);
     }
     g_controls[kLSUp] = std::max(ahead, 0.0f), g_controls[kLSDown] = std::max(-ahead, 0.0f);
-    g_controls[kRSLeft] = std::max(-side, 0.0f), g_controls[kRSRight] = std::max(side, 0.0f);
-    g_controls[kLSLeft] = std::max(-turn_stick, 0.0f), g_controls[kLSRight] = std::max(turn_stick, 0.0f);
+    if (app::Get().vr_game_sticks == 2) {
+        // the title's own layout is the modern one already: aside on its left stick, turning on its right
+        g_controls[kLSLeft] = std::max(-side, 0.0f), g_controls[kLSRight] = std::max(side, 0.0f);
+        g_controls[kRSLeft] = std::max(-turn_stick, 0.0f), g_controls[kRSRight] = std::max(turn_stick, 0.0f);
+    } else {
+        g_controls[kRSLeft] = std::max(-side, 0.0f), g_controls[kRSRight] = std::max(side, 0.0f);
+        g_controls[kLSLeft] = std::max(-turn_stick, 0.0f), g_controls[kLSRight] = std::max(turn_stick, 0.0f);
+    }
     if (recentre && g_head_valid) {
         g_origin = g_head.position;
         g_screen_yaw = g_head.yaw;
@@ -679,6 +688,25 @@ void Pitch(float up) {
     if (pose.world) pose.pitch = up * kPi / 180;
 }
 
+bool HandAims() {
+    std::lock_guard lock(g_lock);
+    return g_running && g_hand_valid && app::Get().vr_hand_aim;
+}
+bool CameraYaw(float& left) {
+    left = g_camera_yaw;
+    return g_camera_known;
+}
+float TurnStick() { return g_turn_stick; }
+void Yaw(float left) {
+    std::lock_guard lock(g_lock);
+    Pose& pose = g_frames[g_title_frame % kFrames];
+    if (pose.world) pose.yaw = left * kPi / 180;
+}
+bool CameraPitch(float& up) {
+    up = g_camera_pitch;
+    return g_camera_known;
+}
+
 void Hold() {
     std::lock_guard lock(g_lock);
     Pose& pose = g_frames[g_title_frame % kFrames];
@@ -901,6 +929,19 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
                 if (std::fabs(up[i]) > std::fabs(up[k])) k = i;
             if (k != g_up_axis) LOGR("vr: the world's up is its %c axis (%s), from the camera's matrix", "xyz"[k], up[k] > 0 ? "positive" : "negative");
             const float s = up[k] > 0 ? 1.0f : -1.0f;
+            g_camera_pitch = std::asin(std::clamp(s * ahead[k], -1.0f, 1.0f)) * 180 / kPi;
+            // the heading: the angle of what lies ahead in the level plane, counted so that turning to the left (against
+            // the camera's right) raises it, and carried on over full turns
+            {
+                const int e1 = (k + 1) % 3, e2 = (k + 2) % 3;
+                const float a1 = ahead[e1], a2 = ahead[e2], t1 = -right[e1], t2 = -right[e2];
+                const float way = a2 * t1 - a1 * t2 >= 0 ? 1.0f : -1.0f;
+                const float now = way * std::atan2(a1, a2) * 180 / kPi;
+                static float last = now;
+                g_camera_yaw = g_camera_yaw + std::remainder(now - last, 360.0f);
+                last = now;
+            }
+            g_camera_known = true;
             float y[3] = {s * right[k], s * up[k], -s * ahead[k]}, z[3] = {0, 0, 1};
             unit(y, y);
             const float d = z[0] * y[0] + z[1] * y[1] + z[2] * y[2];

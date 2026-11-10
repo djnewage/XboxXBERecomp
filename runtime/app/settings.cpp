@@ -230,6 +230,7 @@ void Load() {
     s.vr = t["vr"].value_or(s.vr);
     s.vr_hand_aim = t["vr_hand_aim"].value_or(s.vr_hand_aim);
     s.vr_snap_turn = std::min<uint32_t>(t["vr_snap_turn"].value_or(s.vr_snap_turn), 90);
+    s.vr_game_sticks = std::clamp<uint32_t>(t["vr_game_sticks"].value_or(s.vr_game_sticks), 1, 2);
     s.vr_render_height = std::clamp<uint32_t>(t["vr_render_height"].value_or(s.vr_render_height), 480, 4320);
     s.vr_gun[0] = float(t["vr_gun_x"].value_or(double(s.vr_gun[0])));
     s.vr_gun[1] = float(t["vr_gun_y"].value_or(double(s.vr_gun[1])));
@@ -334,6 +335,7 @@ toml::table Table() {
                   {"vr", s.vr},
                   {"vr_hand_aim", s.vr_hand_aim},
                   {"vr_snap_turn", int64_t(s.vr_snap_turn)},
+                  {"vr_game_sticks", int64_t(s.vr_game_sticks)},
                   {"vr_render_height", int64_t(s.vr_render_height)},
                   {"vr_gun_x", double(s.vr_gun[0])},
                   {"vr_gun_y", double(s.vr_gun[1])},
@@ -401,12 +403,13 @@ bool ReloadVr() {
     s.vr_units = std::clamp<uint32_t>(uint32_t(t["vr_units"].value_or(int64_t(s.vr_units))), 1, 1000);
     s.vr_hud_distance = std::clamp<uint32_t>(uint32_t(t["vr_hud_distance"].value_or(int64_t(s.vr_hud_distance))), 100, 1000);
     s.vr_snap_turn = std::min<uint32_t>(uint32_t(t["vr_snap_turn"].value_or(int64_t(s.vr_snap_turn))), 90);
+    s.vr_game_sticks = std::clamp<uint32_t>(uint32_t(t["vr_game_sticks"].value_or(int64_t(s.vr_game_sticks))), 1, 2);
     s.vr_gun[0] = float(t["vr_gun_x"].value_or(double(s.vr_gun[0])));
     s.vr_gun[1] = float(t["vr_gun_y"].value_or(double(s.vr_gun[1])));
     s.vr_gun[2] = float(t["vr_gun_z"].value_or(double(s.vr_gun[2])));
     s.vr_gun_scale = std::clamp(float(t["vr_gun_scale"].value_or(double(s.vr_gun_scale))), 0.2f, 2.0f);
-    LOGR("settings: the headset's numbers read again: %u units a metre, gun %.1f %.1f %.1f scale %.2f, HUD %u cm, turn %u", s.vr_units,
-         s.vr_gun[0], s.vr_gun[1], s.vr_gun[2], s.vr_gun_scale, s.vr_hud_distance, s.vr_snap_turn);
+    LOGR("settings: the headset's numbers read again: %u units a metre, gun %.1f %.1f %.1f scale %.2f, HUD %u cm, turn %u, the game's sticks %u", s.vr_units,
+         s.vr_gun[0], s.vr_gun[1], s.vr_gun[2], s.vr_gun_scale, s.vr_hud_distance, s.vr_snap_turn, s.vr_game_sticks);
     return true;
 }
 

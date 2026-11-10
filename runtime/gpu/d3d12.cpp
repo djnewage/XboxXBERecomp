@@ -236,6 +236,7 @@ public:
     void CopyEye(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points);
     void SetEye(int eye);
     Target* right_front_ = nullptr;  // the right eye's finished frame, for DrawFrame
+    bool held_seen_ = false;         // a held weapon was drawn at the hand this frame: the crosshair lies along the hand's line
     void Sync(uint32_t data, uint32_t size) override;
     void SyncLate(uint32_t data) override;
     bool DeliverLate(uint32_t data) override;
@@ -2531,6 +2532,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     float rot[9], at[3];
     const bool held = s.held && kind && vr::Held(rot, at);
     if (held) {
+        held_seen_ = true;
         // (and made the size it is to be, Settings::vr_gun_scale, about the grip)
         const float* grip = app::Get().vr_gun;
         const float size = app::Get().vr_gun_scale;
@@ -2720,9 +2722,10 @@ void D3D12Backend::DrawEye(const State& s, uint32_t prim, uint32_t start, uint32
             c.vr2d[4][3] = lean[1], c.vr2d[3][3] = lean[2];
             // Far off, so it does not sit on the gun and the arm when the player sights along them, and a little above the
             // hand's line as sights are (the hand's own up: the second column of its turn).
-            if (vr::Held(hrot, hand)) {
+            // (a gun that is the camera's own, a mounted one, shoots along the camera: the crosshair on its axis)
+            far_off = true;
+            if (held_seen_ && vr::Held(hrot, hand)) {
                 constexpr float kSightsUp = 0.06f;  // metres
-                far_off = true;
                 c.vr2d[4][0] = hand[0] + hrot[1] * kSightsUp * vr::Units();
                 c.vr2d[4][1] = hand[1] + hrot[4] * kSightsUp * vr::Units();
                 c.vr2d[4][2] = hand[2] + hrot[7] * kSightsUp * vr::Units();
@@ -3355,6 +3358,7 @@ void D3D12Backend::Present(const Surface& front) {
     g_perf.swap += PerfMs(perf_swap);
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
     vr::Next();
+    held_seen_ = false;
 
     presents_++;
     presents_seen_.store(presents_);

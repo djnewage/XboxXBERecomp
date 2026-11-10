@@ -869,8 +869,10 @@ bool DrawWithin(const State& s, const Assembled& a, float x0, float x1, float y0
     if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
                                   e.format != DXGI_FORMAT_R32G32_FLOAT)))
         return false;
+    // the screen position: given, or through a program's 2D matrix (clip x and y over the viewport, as DrawSpan's x)
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
-    if (program && s.vs->screen != 1) return false;  // through a matrix: not asked yet
+    const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
+    if (program && s.vs->screen != 1 && (k < 0 || k + 1 >= 192)) return false;
     count = std::min<uint32_t>(count, 4096);
     for (uint32_t i = 0; i < count; i++) {
         float p[4] = {0, 0, 0, 1};
@@ -880,7 +882,13 @@ bool DrawWithin(const State& s, const Assembled& a, float x0, float x1, float y0
             size_t n = e.format == DXGI_FORMAT_R32G32_FLOAT ? 2 : e.format == DXGI_FORMAT_R32G32B32_FLOAT ? 3 : 4;
             std::memcpy(p, b.src + size_t(i) * b.stride + e.offset, n * 4);
         }
-        if (p[0] < x0 || p[0] > x1 || p[1] < y0 || p[1] > y1) return false;
+        float x = p[0], y = p[1];
+        if (k >= 0) {
+            const auto &mx = s.vsc[size_t(k)], &my = s.vsc[size_t(k) + 1];
+            x = s.viewport.x + (mx[0] * p[0] + mx[1] * p[1] + mx[2] * p[2] + mx[3] + 1) * 0.5f * s.viewport.w;
+            y = s.viewport.y + (1 - (my[0] * p[0] + my[1] * p[1] + my[2] * p[2] + my[3])) * 0.5f * s.viewport.h;
+        }
+        if (x < x0 || x > x1 || y < y0 || y > y1) return false;
     }
     return true;
 }

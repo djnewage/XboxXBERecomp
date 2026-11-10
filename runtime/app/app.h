@@ -59,6 +59,10 @@ struct Settings {
     float vr_gun[3] = {5.0f, -6.0f, -19.0f};
     float vr_gun_scale = 1.0f;       // a held weapon's size: a first person model is made large, for a flat screen
     uint32_t vr_render_height = 1600;  // lines an eye's picture is drawn with in a headset (the desktop's 2160 was four times an Index panel)
+    // which of the title's own stick layouts is on, for the hand controllers' walker layout to be laid over it: 1 the
+    // left stick forward, back and turning, the right one's x stepping aside (Agent Under Fire's first setup); 2 the left
+    // stick walks and steps aside, the right one turns (its other setup, which a loaded save may bring)
+    uint32_t vr_game_sticks = 1;
     uint32_t vr_snap_turn = 0;       // degrees a push of the right stick turns by; 0 turns smoothly
     bool vr_hand_aim = true;         // in a headset the right hand aims the view the title shoots along, not the head
     bool vr = false;                 // a headset through OpenXR (vr/vr.h), Direct3D 12 only, at the next start

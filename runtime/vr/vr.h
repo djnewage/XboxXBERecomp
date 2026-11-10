@@ -60,6 +60,15 @@ float TakeTurn();
 // the title's camera looks ahead, level, the way the player faced when recentred, whatever the head does (a car's, a
 // rail's): its frames are views of the world from there, turned to the head by the renderer
 void Ahead();
+// the right hand is tracked and is to aim (Settings::vr_hand_aim): what Head gives is its angles
+bool HandAims();
+// how far up a title's own camera looked in the last frame drawn, in degrees, from a vertex program's matrix (a title
+// drawing through programs: Agent Under Fire's driving levels); false before any
+bool CameraPitch(float& up);
+// its heading likewise, in degrees growing to the left, without a jump at a full turn; from where it starts is arbitrary
+bool CameraYaw(float& left);
+void Yaw(float left);   // as Pitch: the frame the title is building is drawn at this yaw
+float TurnStick();      // the right stick's x, -1 left to 1 right (0 while it turns by steps: TakeTurn)
 void Hold();
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands
