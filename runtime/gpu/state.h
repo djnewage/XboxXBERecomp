@@ -208,6 +208,9 @@ struct State {
     // a headset: a game hook says what is being drawn is held in the aiming hand (a first person weapon, drawn where the
     // title's camera has it): the renderer draws it at the hand (vr::Held)
     bool held = false;
+    // a headset: the title's frame this state is drawn in (vr::TitleFrame, set at each Swap), so the renderer takes that
+    // frame's pose whatever stands between the title and it
+    uint32_t vr_frame = 0;
     // a game hook turns the draws whose stage 0 texture has this format (D3DFORMAT, the header's format byte; 0 none)
     // into a black clear of the target: EoN's menu movie (YUY2) behind the title art, which the console never shows; on
     // ultrawide it showed at the sides, or a stale picture did without it (the title clears nothing)

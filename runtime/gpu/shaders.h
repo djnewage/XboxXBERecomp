@@ -139,8 +139,10 @@ struct DrawConstants {
     float pts[4];        // point sprites on, size min, size max, D3DRS_POINTSIZE (console pixels)
     // a headset's 2D ([3][1] set): the frame's 2D stands on a plane ahead of the title's camera, seen from the eye.
     // [0..2].xyz the columns of the turn from that camera to the head, [0].w and [1].w the frame's tangents (half
-    // angles), [2].w the plane's distance, [3].x the eye's offset, [3].z the frame's size on the plane (1 as drawn)
-    float vr2d[4][4];
+    // angles), [2].w the plane's distance, [3].z the frame's size on the plane (1 as drawn); [4].xyz where the plane's
+    // middle is moved to from the camera's axis (the aiming hand: the crosshair lies along the gun), and the eye's
+    // place in the head's axes, taken off last, is ([3].x, [4].w, [3].w)
+    float vr2d[5][4];
 };
 
 }  // namespace gpu

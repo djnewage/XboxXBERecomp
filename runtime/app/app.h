@@ -56,7 +56,9 @@ struct Settings {
     uint32_t vr_hud_distance = 300;  // centimetres from the head to the HUD and the crosshair
     // where a held weapon's grip is as the title draws it, from its camera, in its units (x right, y up, z towards the
     // viewer): that point is put at the aiming hand
-    float vr_gun[3] = {5.0f, -6.0f, -14.0f};
+    float vr_gun[3] = {5.0f, -6.0f, -19.0f};
+    float vr_gun_scale = 1.0f;       // a held weapon's size: a first person model is made large, for a flat screen
+    uint32_t vr_render_height = 1600;  // lines an eye's picture is drawn with in a headset (the desktop's 2160 was four times an Index panel)
     uint32_t vr_snap_turn = 0;       // degrees a push of the right stick turns by; 0 turns smoothly
     bool vr_hand_aim = true;         // in a headset the right hand aims the view the title shoots along, not the head
     bool vr = false;                 // a headset through OpenXR (vr/vr.h), Direct3D 12 only, at the next start
@@ -103,6 +105,9 @@ bool OverlayKey(uint16_t vk);
 Settings& Get();
 void Load();
 void Save();
+// the headset's numbers (vr_units, vr_gun_*, vr_hud_distance, vr_snap_turn) again from the settings file when it has
+// changed on disk: tuned while playing; true when it read them
+bool ReloadVr();
 void LogSettings();  // every setting, as the settings file has them
 void LogSystem();    // the machine and the settings, at a run's start
 void ApplyDisplay();  // any thread

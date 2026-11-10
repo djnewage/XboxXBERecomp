@@ -2493,6 +2493,8 @@ void D3D12Backend::DeliverReports() {
 // 2D is left where it is. The state is put back after the draw.
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     if (!vr::Stereo()) return DrawEye(s, prim, start, count, indices);
+    vr::RenderFrame(s.vr_frame);
+    vr::NoteDraw(s, count);  // the frame's projection, as the title set it
     State& m = const_cast<State&>(s);
     float turn[9], shift[3] = {};
     int kind = 0;  // 1 the projection, 2 a program's matrix at k
@@ -2512,7 +2514,13 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     }
     std::array<float, 16> kept{};
     if (kind == 1) kept = s.transforms[3];
-    if (kind == 2) std::memcpy(kept.data(), s.vsc[size_t(k)].data(), 64);
+    if (kind == 2) {
+        std::memcpy(kept.data(), s.vsc[size_t(k)].data(), 64);
+        // its field of view, for the frame's (a title drawing all through programs gives no projection)
+        const auto len = [](const float* r) { return std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]); };
+        const float lw = len(&kept[12]), l0 = len(&kept[0]), l1 = len(&kept[4]);
+        if (lw > 1e-9f && l0 > 1e-9f && l1 > 1e-9f) vr::NoteProgram(lw / l0, lw / l1, count);
+    }
     // What the title draws as held (State::held: a first person weapon, where its camera has it) goes to the aiming hand
     // first: the point of it that is the grip (Settings::vr_gun) to where the hand is, turned as the hand is (its roll:
     // the camera already points where the hand does). p' = (p - grip) * rot^T + at, row vectors.
@@ -2520,10 +2528,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     float rot[9], at[3];
     const bool held = s.held && kind && vr::Held(rot, at);
     if (held) {
+        // (and made the size it is to be, Settings::vr_gun_scale, about the grip)
         const float* grip = app::Get().vr_gun;
+        const float size = app::Get().vr_gun_scale;
         for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++) hw[i * 4 + j] = rot[j * 3 + i];
-        for (int j = 0; j < 3; j++) hw[12 + j] = at[j] - (grip[0] * rot[j * 3] + grip[1] * rot[j * 3 + 1] + grip[2] * rot[j * 3 + 2]);
+            for (int j = 0; j < 3; j++) hw[i * 4 + j] = size * rot[j * 3 + i];
+        for (int j = 0; j < 3; j++) hw[12 + j] = at[j] - size * (grip[0] * rot[j * 3] + grip[1] * rot[j * 3 + 1] + grip[2] * rot[j * 3 + 2]);
     }
     for (int eye = 0; eye < 2; eye++) {
         SetEye(eye);
@@ -2583,7 +2593,6 @@ void D3D12Backend::DrawEye(const State& s, uint32_t prim, uint32_t start, uint32
     }
     PerfScope perf_draw{g_perf.draw};
     g_perf.draws++;
-    vr::NoteDraw(s, count);
     if (cap_) CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
     // XBE_CAPTURE_DRAWS=vs:...: the target once before the first draw with that shader, before this draw binds anything
     if (cap_ && !cap_vs_before_ && diag::CaptureDraws().vs && s.vs_handle == diag::CaptureDraws().vs) {
@@ -2696,13 +2705,30 @@ void D3D12Backend::DrawEye(const State& s, uint32_t prim, uint32_t start, uint32
         // the head, half its size, so its corners can be read without looking away
         const float w = c.hud[1] * 2, h = float(bound_rt_->gh) / s.aa_y;
         const bool crosshair = DrawWithin(s, a, w * 0.36f, w * 0.64f, h * 0.36f, h * 0.64f);
+        float lean[3], hrot[9], hand[3];
+        bool far_off = false;
         if (!crosshair) {
             const float same[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
             std::memcpy(turn, same, sizeof(turn));
+        } else if (vr::EyeShift(g_eye, turn, lean)) {
+            // the crosshair is in the world as the gun is: seen from where the head has moved to, and along the gun's own
+            // line when the gun is in the hand (the title still shoots from its camera, beside it by the hand's distance)
+            offset = lean[0];
+            c.vr2d[4][3] = lean[1], c.vr2d[3][3] = lean[2];
+            // Far off, so it does not sit on the gun and the arm when the player sights along them, and a little above the
+            // hand's line as sights are (the hand's own up: the second column of its turn).
+            if (vr::Held(hrot, hand)) {
+                constexpr float kSightsUp = 0.06f;  // metres
+                far_off = true;
+                c.vr2d[4][0] = hand[0] + hrot[1] * kSightsUp * vr::Units();
+                c.vr2d[4][1] = hand[1] + hrot[4] * kSightsUp * vr::Units();
+                c.vr2d[4][2] = hand[2] + hrot[7] * kSightsUp * vr::Units();
+            }
         }
         for (int j = 0; j < 3; j++) c.vr2d[j][0] = turn[j], c.vr2d[j][1] = turn[3 + j], c.vr2d[j][2] = turn[6 + j];
-        c.vr2d[0][3] = tx, c.vr2d[1][3] = ty, c.vr2d[2][3] = float(app::Get().vr_hud_distance) / 100 * float(app::Get().vr_units);
+        c.vr2d[0][3] = tx, c.vr2d[1][3] = ty, c.vr2d[2][3] = float(app::Get().vr_hud_distance) / 100 * vr::Units();
         c.vr2d[3][0] = offset, c.vr2d[3][1] = 1, c.vr2d[3][2] = crosshair ? 1.0f : 0.5f;
+        if (far_off) c.vr2d[2][3] = 20.0f * vr::Units();  // metres: the same size to the eye, the plane being the frame's
     }
     if (c.hud[0] != 1 && !s.squeeze_beyond) {
         Span span = DrawSpan(s, a, c.hud[1] * 2);
@@ -2792,6 +2818,7 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
 
 void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                          uint32_t stencil) {
+    if (vr::Stereo()) vr::RenderFrame(s.vr_frame);
     for (int eye = 0; eye < (vr::Stereo() ? 2 : 1); eye++) {
         SetEye(eye);
         ClearEye(s, count, rects, flags, color, z, stencil);

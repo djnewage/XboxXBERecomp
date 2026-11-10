@@ -230,9 +230,11 @@ void Load() {
     s.vr = t["vr"].value_or(s.vr);
     s.vr_hand_aim = t["vr_hand_aim"].value_or(s.vr_hand_aim);
     s.vr_snap_turn = std::min<uint32_t>(t["vr_snap_turn"].value_or(s.vr_snap_turn), 90);
+    s.vr_render_height = std::clamp<uint32_t>(t["vr_render_height"].value_or(s.vr_render_height), 480, 4320);
     s.vr_gun[0] = float(t["vr_gun_x"].value_or(double(s.vr_gun[0])));
     s.vr_gun[1] = float(t["vr_gun_y"].value_or(double(s.vr_gun[1])));
     s.vr_gun[2] = float(t["vr_gun_z"].value_or(double(s.vr_gun[2])));
+    s.vr_gun_scale = std::clamp(float(t["vr_gun_scale"].value_or(double(s.vr_gun_scale))), 0.2f, 2.0f);
     s.vr_hud_distance = std::clamp<uint32_t>(t["vr_hud_distance"].value_or(s.vr_hud_distance), 100, 1000);
     s.vr_units = std::clamp<uint32_t>(t["vr_units"].value_or(s.vr_units), 1, 1000);
     s.sharpen = std::min<uint32_t>(t["sharpen"].value_or(s.sharpen), 100);
@@ -332,9 +334,11 @@ toml::table Table() {
                   {"vr", s.vr},
                   {"vr_hand_aim", s.vr_hand_aim},
                   {"vr_snap_turn", int64_t(s.vr_snap_turn)},
+                  {"vr_render_height", int64_t(s.vr_render_height)},
                   {"vr_gun_x", double(s.vr_gun[0])},
                   {"vr_gun_y", double(s.vr_gun[1])},
                   {"vr_gun_z", double(s.vr_gun[2])},
+                  {"vr_gun_scale", double(s.vr_gun_scale)},
                   {"vr_hud_distance", int64_t(s.vr_hud_distance)},
                   {"vr_units", int64_t(s.vr_units)},
                   {"sharpen", int64_t(s.sharpen)},
@@ -378,6 +382,33 @@ toml::table Table() {
 }
 
 }  // namespace
+
+bool ReloadVr() {
+    static std::filesystem::file_time_type seen{};
+    std::error_code ec;
+    const auto now = std::filesystem::last_write_time(File(), ec);
+    if (ec || now == seen) return false;
+    const bool first = seen == std::filesystem::file_time_type{};
+    seen = now;
+    if (first) return false;  // as loaded at the start
+    toml::table t;
+    try {
+        t = toml::parse_file(File().string());
+    } catch (const toml::parse_error&) {
+        return false;  // half written: the next look
+    }
+    Settings& s = Get();
+    s.vr_units = std::clamp<uint32_t>(uint32_t(t["vr_units"].value_or(int64_t(s.vr_units))), 1, 1000);
+    s.vr_hud_distance = std::clamp<uint32_t>(uint32_t(t["vr_hud_distance"].value_or(int64_t(s.vr_hud_distance))), 100, 1000);
+    s.vr_snap_turn = std::min<uint32_t>(uint32_t(t["vr_snap_turn"].value_or(int64_t(s.vr_snap_turn))), 90);
+    s.vr_gun[0] = float(t["vr_gun_x"].value_or(double(s.vr_gun[0])));
+    s.vr_gun[1] = float(t["vr_gun_y"].value_or(double(s.vr_gun[1])));
+    s.vr_gun[2] = float(t["vr_gun_z"].value_or(double(s.vr_gun[2])));
+    s.vr_gun_scale = std::clamp(float(t["vr_gun_scale"].value_or(double(s.vr_gun_scale))), 0.2f, 2.0f);
+    LOGR("settings: the headset's numbers read again: %u units a metre, gun %.1f %.1f %.1f scale %.2f, HUD %u cm, turn %u", s.vr_units,
+         s.vr_gun[0], s.vr_gun[1], s.vr_gun[2], s.vr_gun_scale, s.vr_hud_distance, s.vr_snap_turn);
+    return true;
+}
 
 void Save() {
     std::ofstream f(File());
@@ -460,6 +491,7 @@ float FrameAspect() {
 }
 
 float RenderScale(uint32_t guest_height) {
+    if (uint32_t lines = vr::RenderHeight()) return guest_height ? std::max(float(lines) / guest_height, 0.1f) : 1.0f;
     float h = Output().height * (Get().render_percent / 100.0f);
     return guest_height ? std::max(h / guest_height, 0.1f) : 1.0f;
 }

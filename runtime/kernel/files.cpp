@@ -405,6 +405,9 @@ static bool Hidden(const std::string& name) {
 
 // exports
 
+// a title's saves (UDATA, TDATA): what it asks the disk for there is logged, a few lines when a save menu is used
+bool SaveArea(const std::string& host) { return host.find("UDATA") != std::string::npos || host.find("TDATA") != std::string::npos; }
+
 KERNEL_EXPORT(190, NtCreateFile, 9) {
     uint32_t handle_out = a[0], access = a[1], attrs = a[2], iosb = a[3], disposition = a[7], options = a[8];
     (void)access;
@@ -417,6 +420,11 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     Target t = Resolve(name, root);
     if (t.disc) return OpenOnDisc(t.entry, name, handle_out, iosb, disposition, options);
     const std::string& host = t.host;
+    if (SaveArea(host)) {
+        std::error_code sec;
+        LOGR("files: save area: create %s (disposition %u, options %X): %s", host.c_str(), disposition, options,
+             fs::exists(host, sec) ? (fs::is_directory(host, sec) ? "a folder" : "a file") : "not there");
+    }
     if (host.empty()) {
         LOGW("NtCreateFile: no mapping for %s", name.c_str());
         IoStatus(iosb, kObjectPathNotFound, 0);
@@ -528,6 +536,9 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
     if (t.disc) return OpenOnDisc(t.entry, name, handle_out, iosb, 1, options);
     const std::string& host = t.host;
     std::error_code ec;
+    if (SaveArea(host))
+        LOGR("files: save area: open %s (options %X): %s", host.c_str(), options,
+             fs::exists(host, ec) ? (fs::is_directory(host, ec) ? "a folder" : "a file") : "not there");
     if (host.empty() || !fs::exists(host, ec)) {
         FILE_LOG(200, "missing %s", name.c_str());
         IoStatus(iosb, kObjectNameNotFound, 5);
@@ -862,11 +873,13 @@ KERNEL_EXPORT(207, NtQueryDirectoryFile, 10) {
         f->listed = true;
     }
     if (f->next >= (f->entry ? f->disc_entries.size() : f->entries.size())) {
+        if (!f->entry && SaveArea(f->host.string())) LOGR("files: save area: listing %s for %s: no more (%zu found)", f->host.string().c_str(), pat.c_str(), f->entries.size());
         IoStatus(iosb, kNoMoreFiles, 0);
         return f->next == 0 ? kNoSuchFile : kNoMoreFiles;
     }
     size_t i = f->next++;
     std::string fname = f->entry ? f->disc_entries[i]->name : f->entries[i].path().filename().string();
+    if (!f->entry && SaveArea(f->host.string())) LOGR("files: save area: listing %s for %s: %s", f->host.string().c_str(), pat.c_str(), fname.c_str());
     uint32_t need = 0x40 + uint32_t(fname.size());
     if (len < need) return kBufferTooSmall;
     std::memset(HostPtr(out), 0, need);

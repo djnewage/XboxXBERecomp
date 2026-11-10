@@ -91,9 +91,12 @@ struct Pose {
     XrQuaternionf hand_q{0, 0, 0, 1};
     XrVector3f hand_at{0, 0, 0};
     XrVector3f position{0, 0, 0};
+    uint64_t at = 0;  // when the head was read for it (GetTickCount64), for the log
 };
 
 std::atomic<bool> g_failed{false}, g_running{false};
+std::atomic<float> g_units{0};   // a title's own units a metre (SetUnits), 0 the setting's
+std::atomic<int> g_layout{0};    // how the hand controllers' sticks play (Layout)
 
 // the head as last located, for the title (g_lock)
 std::mutex g_lock;
@@ -143,8 +146,17 @@ struct Seen {
     float x, y;  // the tangents of the half angles
     uint64_t vertices;
 };
-std::vector<Seen> g_seen;
+std::vector<Seen> g_seen, g_seen_programs;  // the fixed function's projections, and vertex programs' (a title with no other)
 float g_tan_x = 0, g_tan_y = 0;
+float g_tan_try_x = 0, g_tan_try_y = 0;  // the last frames' own, taken once it has held a few frames
+int g_tan_held = 0;
+
+// what the headset was given, for the log: every five seconds, and when it changes
+struct Given {
+    uint32_t frames = 0, world = 0, screen = 0, none = 0, idle = 0, bad = 0;
+} g_given;
+uint64_t g_given_at = 0;
+int g_given_kind = -1;
 
 // The hand controllers play controller 1 (input::Poll takes Controls): the left stick walks, the right one turns (the head
 // looks up and down) and jumps pushed up, the triggers are the triggers, the right hand's A and B the console's, its grip
@@ -295,7 +307,8 @@ void ReadControls() {
         v[kBlack] = Float(g_grip, 1) > 0.35f;  // alt. fire
         v[kA] = Bool(g_a, 1), v[kB] = Bool(g_b, 1);
         v[kWhite] = Bool(g_a, 0), v[kStart] = Bool(g_b, 0);
-        v[kLThumb] = Bool(g_click, 0), v[kRThumb] = Bool(g_click, 1);
+        v[kLThumb] = Bool(g_click, 0);
+        v[kRThumb] = Bool(g_click, 1) || r.y < -0.7f;  // pressed in, or pulled back (a title's spare button: the next gadget in Agent Under Fire)
         if (Float(g_pad_force, 0) > 0.3f) {
             XrVector2f d = Vec(g_pad, 0);
             if (std::fabs(d.x) > std::fabs(d.y)) v[d.x < 0 ? kLeft : kRight] = 1;
@@ -317,6 +330,18 @@ void ReadControls() {
     // stick is turned by the angle between them. Its sticks (this renderer's titles so far, as Agent Under Fire's first
     // setup): the left one forward and back and turning, the right one's x stepping aside.
     float side = walk.x, ahead = walk.y;
+    if (g_layout == 1) {
+        // a title steered with the left stick (driving): the sticks as they are, the right one's x the turning stick's read
+        g_controls[kLSUp] = std::max(walk.y, 0.0f), g_controls[kLSDown] = std::max(-walk.y, 0.0f);
+        g_controls[kLSLeft] = std::max(-walk.x, 0.0f), g_controls[kLSRight] = std::max(walk.x, 0.0f);
+        g_controls[kRSLeft] = std::max(-turn_stick, 0.0f), g_controls[kRSRight] = std::max(turn_stick, 0.0f);
+        if (recentre && g_head_valid) {
+            g_origin = g_head.position;
+            g_screen_yaw = g_head.yaw;
+            LOGR("vr: recentred");
+        }
+        return;
+    }
     if (app::Get().vr_hand_aim && g_hand_valid && g_head_valid) {
         const float a = g_head.yaw - g_hand_yaw;
         side = walk.x * std::cos(a) - walk.y * std::sin(a);
@@ -528,7 +553,8 @@ bool EnsureSwapchain(int eye, uint32_t w, uint32_t h) {
     std::vector<int64_t> formats(n);
     if (n) xrEnumerateSwapchainFormats(g_session, n, &n, formats.data());
     g_swap_format = DXGI_FORMAT_UNKNOWN;
-    for (DXGI_FORMAT want : {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM,
+    // BGRA first: the renderer's frames are B8G8R8A8, which copies into it as it is (Frame)
+    for (DXGI_FORMAT want : {DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM,
                              DXGI_FORMAT_B8G8R8A8_UNORM})
         if (g_swap_format == DXGI_FORMAT_UNKNOWN && std::find(formats.begin(), formats.end(), int64_t(want)) != formats.end())
             g_swap_format = want;
@@ -574,6 +600,7 @@ void LocateHead() {
     g_head.world = true;
     Angles(loc.pose.orientation, g_head.yaw, g_head.pitch);
     g_head.head = loc.pose.orientation;
+    g_head.at = GetTickCount64();
     g_head.position = loc.pose.position;
     XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
     info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -593,8 +620,11 @@ void LocateHead() {
 
 bool Enabled() { return app::Get().vr && !g_failed; }
 bool Running() { return g_running; }
+float Units() { return g_units > 0 ? g_units.load() : float(app::Get().vr_units); }
+void SetUnits(float units) { g_units = units; }
+void Layout(int layout) { g_layout = layout; }
 bool Stereo() { return g_running; }
-float EyeOffset(int eye) { return (eye ? 1.0f : -1.0f) * g_half_ipd * float(app::Get().vr_units); }
+float EyeOffset(int eye) { return (eye ? 1.0f : -1.0f) * g_half_ipd * Units(); }
 
 bool Controls(float* v) {
     std::lock_guard lock(g_lock);
@@ -631,13 +661,40 @@ void Hold() {
     if (!g_running || !g_head_valid || !pose.world) return;
     pose.head = g_head.head;
     pose.position = g_head.position;
+    pose.at = g_head.at;
     g_title_at = GetTickCount64();
+}
+
+void Ahead() {
+    std::lock_guard lock(g_lock);
+    if (!g_running || !g_head_valid) return;
+    Pose pose = g_head;
+    pose.yaw = g_screen_yaw, pose.pitch = 0;
+    g_frames[g_title_frame % kFrames] = pose;
+    g_title_at = GetTickCount64();
+}
+
+void NoteProgram(float tan_x, float tan_y, uint32_t count) {
+    if (!g_running) return;
+    for (Seen& seen : g_seen_programs)
+        if (std::fabs(seen.x - tan_x) < 1e-3f && std::fabs(seen.y - tan_y) < 1e-3f) {
+            seen.vertices += count;
+            return;
+        }
+    if (g_seen_programs.size() < 16) g_seen_programs.push_back({tan_x, tan_y, count});
 }
 
 void Flat() {
     std::lock_guard lock(g_lock);
     g_frames[g_title_frame % kFrames] = {};
 }
+
+uint32_t TitleFrame() {
+    std::lock_guard lock(g_lock);
+    return uint32_t(g_title_frame);
+}
+void RenderFrame(uint32_t frame) { g_render_frame = frame; }
+uint32_t RenderHeight() { return Enabled() ? app::Get().vr_render_height : 0; }
 
 void TitlePresented() {
     std::lock_guard lock(g_lock);
@@ -691,7 +748,7 @@ bool EyeShift(int eye, float turn[9], float shift[3]) {
     const float x = q.x, y = q.y, z = q.z, w = q.w;
     const float g[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
                         2 * (y * z - x * w),     2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)};
-    const float units = float(app::Get().vr_units);
+    const float units = Units();
     float t[3];
     for (int i = 0; i < 3; i++) t[i] = (g[i] * d[0] + g[3 + i] * d[1] + g[6 + i] * d[2]) * units;
     // seen from the head's own axes, and the eye to one side there
@@ -721,7 +778,7 @@ bool Held(float rot[9], float at[3]) {
     const float g[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
                         2 * (y * z - x * w),     2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)};
     const float d[3] = {pose.hand_at.x - origin.x, pose.hand_at.y - origin.y, pose.hand_at.z - origin.z};
-    const float units = float(app::Get().vr_units);
+    const float units = Units();
     for (int i = 0; i < 3; i++) at[i] = (g[i] * d[0] + g[3 + i] * d[1] + g[6 + i] * d[2]) * units;
     return true;
 }
@@ -768,14 +825,23 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
     Chain& c = g_chain[eye];
     if (eye == 0) {
         // the frame's projection, whether or not it is shown
+        // The fixed function's when the frame has any; a program's matrix may be no camera's at all (a small room's few
+        // walls are outweighed by one), so those count only for a title that draws nothing else. A plausible one (33 to
+        // 150 degrees), the same for a few frames.
         const Seen* most = nullptr;
-        for (const Seen& seen : g_seen)
+        for (const Seen& seen : g_seen.empty() ? g_seen_programs : g_seen)
             if (!most || seen.vertices > most->vertices) most = &seen;
-        if (most && (std::fabs(most->x - g_tan_x) > 1e-3f || std::fabs(most->y - g_tan_y) > 1e-3f)) {
-            g_tan_x = most->x, g_tan_y = most->y;
-            LOG_FIRST(8, "vr: the scene's field of view %.1f by %.1f degrees", 2 * std::atan(g_tan_x) * 180 / kPi, 2 * std::atan(g_tan_y) * 180 / kPi);
+        if (most && most->x > 0.3f && most->x < 4 && most->y > 0.3f && most->y < 4) {
+            if (std::fabs(most->x - g_tan_try_x) > 1e-3f || std::fabs(most->y - g_tan_try_y) > 1e-3f) {
+                g_tan_try_x = most->x, g_tan_try_y = most->y;
+                g_tan_held = 0;
+            } else if (++g_tan_held == 5 && (std::fabs(most->x - g_tan_x) > 1e-3f || std::fabs(most->y - g_tan_y) > 1e-3f)) {
+                g_tan_x = most->x, g_tan_y = most->y;
+                LOGR("vr: the scene's field of view %.1f by %.1f degrees", 2 * std::atan(g_tan_x) * 180 / kPi, 2 * std::atan(g_tan_y) * 180 / kPi);
+            }
         }
         g_seen.clear();
+        g_seen_programs.clear();
         std::lock_guard lock(g_lock);
         g_shown = g_frames[g_render_frame % kFrames];
         g_chain[0].drew = g_chain[1].drew = false;
@@ -791,6 +857,28 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
         xrReleaseSwapchainImage(c.swap, &release);
         return;
     }
+    // The frame is gamma encoded B8G8R8A8 and the image its sRGB twin: the bytes are copied as they are, which no state the
+    // title's last draws left can spoil (the frame is a shader resource here, the image a render target, and both are
+    // again after). Any other pair goes through the pass below.
+    const D3D12_RESOURCE_DESC from = frame->GetDesc(), to = c.images[index].texture->GetDesc();
+    if (g_swap_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB && DXGI_FORMAT(format) == DXGI_FORMAT_B8G8R8A8_UNORM && from.Width == to.Width &&
+        from.Height == to.Height && from.SampleDesc.Count == 1 && from.MipLevels == to.MipLevels && from.DepthOrArraySize == to.DepthOrArraySize) {
+        D3D12_RESOURCE_STATES fs = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, is = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        ctx.Transition(frame, fs, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        ctx.Transition(c.images[index].texture, is, D3D12_RESOURCE_STATE_COPY_DEST);
+        ctx.List()->CopyResource(c.images[index].texture, frame);
+        ctx.Transition(c.images[index].texture, is, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ctx.Transition(frame, fs, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        static bool said = false;
+        if (!said) LOGR("vr: the frame is copied to the headset as it is");
+        said = true;
+        c.drew = true;
+        return;
+    }
+    static bool said_pass = false;
+    if (!said_pass) LOGR("vr: the frame goes to the headset through a pass (formats %d to %d, %llux%u to %llux%u, mips %u to %u)", format, int(g_swap_format),
+                         (unsigned long long)from.Width, from.Height, (unsigned long long)to.Width, to.Height, unsigned(from.MipLevels), unsigned(to.MipLevels));
+    said_pass = true;
     auto rtv = g_rtv_heap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += size_t(uint32_t(eye) * kMostImages + index) * g_rtv_inc;
     ID3D12Resource* const src[3] = {frame, nullptr, nullptr};
@@ -801,9 +889,40 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
     c.drew = true;
 }
 
+namespace {
+void Report(int kind, bool finite, XrResult result) {
+    Given& g = g_given;
+    g.frames++;
+    (kind == 2 ? g.world : kind == 1 ? g.screen : kind == 0 ? g.none : g.idle)++;
+    if (!finite) g.bad++;
+    const uint64_t now = GetTickCount64();
+    static XrResult last_result = XR_SUCCESS;
+    if (kind != g_given_kind || result != last_result || now - g_given_at >= 5000) {
+        static const char* const kKinds[] = {"not begun", "no layer", "the screen", "the world"};
+        uint64_t title;
+        {
+            std::lock_guard lock(g_lock);
+            title = g_title_frame;
+        }
+        LOGR("vr: %u frames: %u the world, %u the screen, %u no layer, %u not begun, %u with a value not finite; now %s, render %d, "
+             "field of view %.1f by %.1f, xrEndFrame %d; the head read %llu ms before, frame %llu of the title's %llu, yaw %.0f pitch %.0f",
+             g.frames, g.world, g.screen, g.none, g.idle, g.bad, kKinds[kind + 1], int(g_should_render),
+             2 * std::atan(g_tan_x) * 180 / kPi, 2 * std::atan(g_tan_y) * 180 / kPi, int(result),
+             (unsigned long long)(g_shown.at ? now - g_shown.at : 0), (unsigned long long)g_render_frame, (unsigned long long)title,
+             g_shown.yaw * 180 / kPi, g_shown.pitch * 180 / kPi);
+        g = {};
+        g_given_at = now;
+        g_given_kind = kind;
+        last_result = result;
+    }
+}
+}  // namespace
+
 void Submit() {
-    g_render_frame++;  // every present, as the title counts its own
-    if (!g_begun) return;
+    if (!g_begun) {
+        if (g_running) Report(-1, true, XR_SUCCESS);
+        return;
+    }
     g_begun = false;
     XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     XrCompositionLayerProjection world{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -860,12 +979,23 @@ void Submit() {
     end.layerCount = count;
     end.layers = layers;
     XrResult r = xrEndFrame(g_session, &end);
-    if (XR_FAILED(r)) LOG_FIRST(8, "vr: xrEndFrame failed (%d)", int(r));
+    {
+        const Pose& p = g_shown;
+        const float values[] = {p.yaw, p.pitch, p.head.x, p.head.y, p.head.z, p.head.w, p.position.x, p.position.y, p.position.z, g_tan_x, g_tan_y};
+        bool finite = true;
+        for (float v : values) finite = finite && std::isfinite(v);
+        Report(count == 0 ? 0 : g_shown.world ? 2 : 1, finite, r);
+    }
     g_chain[0].drew = g_chain[1].drew = false;
 }
 
 void Next() {
     if (!Enabled() || g_instance == XR_NULL_HANDLE) return;
+    static uint64_t look = 0;
+    if (GetTickCount64() >= look) {
+        look = GetTickCount64() + 1000;
+        app::ReloadVr();
+    }
     if (g_session == XR_NULL_HANDLE) {
         if (GetTickCount64() < g_retry_at) return;
         g_retry_at = GetTickCount64() + kRetryMs;

@@ -63,7 +63,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 wdepth;
     float4 hud;
     float4 pts;  // point sprites on, size min, size max, D3DRS_POINTSIZE
-    float4 vr2d[4];  // DrawConstants::vr2d
+    float4 vr2d[5];  // DrawConstants::vr2d
 };
 )";
 
@@ -245,8 +245,9 @@ const char* kVsEpilogue = R"(
     if (vr2d[3].y != 0) {
         // where it is on the frame, as a point of the plane; then as the eye sees that point
         float3 v = float3(q.x * vr2d[0].w * vr2d[3].z, q.y * vr2d[1].w * vr2d[3].z, -1) * vr2d[2].w;
+        v += vr2d[4].xyz;
         float3 e = float3(dot(v, vr2d[0].xyz), dot(v, vr2d[1].xyz), dot(v, vr2d[2].xyz));
-        e.x -= vr2d[3].x;
+        e -= float3(vr2d[3].x, vr2d[4].w, vr2d[3].w);
         o.pos = float4(e.x / vr2d[0].w, e.y / vr2d[1].w, q.z * -e.z, -e.z);
     } else {
         q.xyz *= p.w;

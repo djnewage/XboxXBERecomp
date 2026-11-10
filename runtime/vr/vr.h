@@ -19,6 +19,11 @@ namespace vr {
 
 bool Enabled();  // the setting is on and OpenXR has not failed for good
 bool Running();  // a session is showing frames: the headset paces the title
+float Units();                 // the title's units in a metre: its own (SetUnits), else Settings::vr_units
+void SetUnits(float units);    // a title whose units are known, from GameInfo::init
+// how the hand controllers' sticks play: 0 a walker's (the left one walks where the head faces, the right one turns),
+// 1 as they are (a driving game: the left one steers)
+void Layout(int layout);
 bool Stereo();   // the renderer draws everything twice, a picture an eye
 // how far to the right of the head an eye is (0 left, 1 right), in the title's units (Settings::vr_units a metre)
 float EyeOffset(int eye);
@@ -33,7 +38,8 @@ bool EyeShift(int eye, float turn[9], float shift[3]);
 // hand's (its roll), by rows; at is where the hand is from the camera, in the camera's axes and the title's units.
 // False when no hand aims the frame.
 bool Held(float rot[9], float at[3]);
-bool Fov(float& tan_x, float& tan_y);  // the tangents of the half angles the frames are drawn at, once known
+bool Fov(float& tan_x, float& tan_y);
+uint32_t RenderHeight();  // the lines an eye's picture is drawn with (Settings::vr_render_height), 0 without a headset  // the tangents of the half angles the frames are drawn at, once known
 
 // --- the title's thread ---
 // The angles in degrees the title is to draw the frame it is about to build at: the aiming hand's when one is tracked
@@ -51,15 +57,22 @@ bool TitleTurn(float turn[9]);
 void Pitch(float up);
 // degrees the title is to turn its camera by now, to the left positive: the right stick's steps (Settings::vr_snap_turn)
 float TakeTurn();
+// the title's camera looks ahead, level, the way the player faced when recentred, whatever the head does (a car's, a
+// rail's): its frames are views of the world from there, turned to the head by the renderer
+void Ahead();
 void Hold();
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands
 bool Controls(float* v);
-void TitlePresented();  // each Swap, before the renderer's Present
+void TitlePresented();
+uint32_t TitleFrame();  // the number of the frame the title is building: the count of its Swaps  // each Swap, before the renderer's Present
 
 // --- the renderer's thread (gpu/d3d12.cpp) ---
 void Start(ID3D12Device* device, ID3D12CommandQueue* queue);
-void NoteDraw(const gpu::State& s, uint32_t count);  // each draw: the frame's projection is read from the scene's
+// each draw and clear: the title's frame it is of (gpu::State::vr_frame), whose pose the calls below use
+void RenderFrame(uint32_t frame);
+void NoteDraw(const gpu::State& s, uint32_t count);
+void NoteProgram(float tan_x, float tan_y, uint32_t count);  // the same for a vertex program's perspective  // each draw: the frame's projection is read from the scene's
 // while the frame's command list is open, the finished frame a shader resource: copies it for the headset
 void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32_t width, uint32_t height);
 void Submit();  // once that list has been handed to the queue
