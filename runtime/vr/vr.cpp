@@ -911,6 +911,24 @@ bool Held(float rot[9], float at[3]) {
     return true;
 }
 
+bool TitleHand(float at[3]) {
+    Pose pose;
+    XrVector3f origin;
+    {
+        std::lock_guard lock(g_lock);
+        pose = g_frames[g_title_frame % kFrames];
+        origin = g_origin;
+    }
+    if (!g_running || !pose.world || !pose.hand) return false;
+    const XrQuaternionf level = Level(pose.yaw, pose.pitch);
+    const float x = level.x, y = level.y, z = level.z, w = level.w;
+    const float g[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+                        2 * (y * z - x * w),     2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)};
+    const float d[3] = {pose.hand_at.x - origin.x, pose.hand_at.y - origin.y, pose.hand_at.z - origin.z};
+    for (int i = 0; i < 3; i++) at[i] = (g[i] * d[0] + g[3 + i] * d[1] + g[6 + i] * d[2]) * Units();
+    return true;
+}
+
 float TakeTurn() { return g_turn_pending.exchange(0); }
 
 bool TitleTurn(float turn[9]) {

@@ -38,6 +38,8 @@ bool EyeShift(int eye, float turn[9], float shift[3]);
 // hand's (its roll), by rows; at is where the hand is from the camera, in the camera's axes and the title's units.
 // False when no hand aims the frame.
 bool Held(float rot[9], float at[3]);
+// the same place for the title's own use, in the frame it is building (a shot leaves from there)
+bool TitleHand(float at[3]);
 bool Fov(float& tan_x, float& tan_y);
 uint32_t RenderHeight();  // the lines an eye's picture is drawn with (Settings::vr_render_height), 0 without a headset  // the tangents of the half angles the frames are drawn at, once known
 
