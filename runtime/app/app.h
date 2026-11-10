@@ -54,6 +54,9 @@ struct Settings {
     bool low_latency = false;        // a waitable swap chain holding one frame, at the next start
     uint32_t vr_units = 32;          // the title's units in a metre, for the distance between the eyes (GameInfo may set it)
     uint32_t vr_hud_distance = 300;  // centimetres from the head to the HUD and the crosshair
+    // where a held weapon's grip is as the title draws it, from its camera, in its units (x right, y up, z towards the
+    // viewer): that point is put at the aiming hand
+    float vr_gun[3] = {5.0f, -6.0f, -14.0f};
     uint32_t vr_snap_turn = 0;       // degrees a push of the right stick turns by; 0 turns smoothly
     bool vr_hand_aim = true;         // in a headset the right hand aims the view the title shoots along, not the head
     bool vr = false;                 // a headset through OpenXR (vr/vr.h), Direct3D 12 only, at the next start

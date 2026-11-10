@@ -2513,11 +2513,27 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     std::array<float, 16> kept{};
     if (kind == 1) kept = s.transforms[3];
     if (kind == 2) std::memcpy(kept.data(), s.vsc[size_t(k)].data(), 64);
+    // What the title draws as held (State::held: a first person weapon, where its camera has it) goes to the aiming hand
+    // first: the point of it that is the grip (Settings::vr_gun) to where the hand is, turned as the hand is (its roll:
+    // the camera already points where the hand does). p' = (p - grip) * rot^T + at, row vectors.
+    float hw[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    float rot[9], at[3];
+    const bool held = s.held && kind && vr::Held(rot, at);
+    if (held) {
+        const float* grip = app::Get().vr_gun;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) hw[i * 4 + j] = rot[j * 3 + i];
+        for (int j = 0; j < 3; j++) hw[12 + j] = at[j] - (grip[0] * rot[j * 3] + grip[1] * rot[j * 3 + 1] + grip[2] * rot[j * 3 + 2]);
+    }
     for (int eye = 0; eye < 2; eye++) {
         SetEye(eye);
         if (kind && vr::EyeShift(eye, turn, shift)) {
             if (kind == 1) {
-                const float b[16] = {turn[0], turn[1], turn[2], 0, turn[3], turn[4], turn[5], 0, turn[6], turn[7], turn[8], 0, -shift[0], -shift[1], -shift[2], 1};
+                const float b0[16] = {turn[0], turn[1], turn[2], 0, turn[3], turn[4], turn[5], 0, turn[6], turn[7], turn[8], 0, -shift[0], -shift[1], -shift[2], 1};
+                float b[16];
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++)
+                        b[r * 4 + c] = hw[r * 4] * b0[c] + hw[r * 4 + 1] * b0[4 + c] + hw[r * 4 + 2] * b0[8 + c] + hw[r * 4 + 3] * b0[12 + c];
                 float* out = m.transforms[3].data();
                 for (int r = 0; r < 4; r++)
                     for (int c = 0; c < 4; c++)
@@ -2532,6 +2548,13 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
                     const float da = -(r2[0] * r3[0] + r2[1] * r3[1] + r2[2] * r3[2]) / (lw * lw), db = r2[3] + da * r3[3];
                     float v[3][4], t[3][4];
                     for (int c = 0; c < 4; c++) v[0][c] = tx * r0[c], v[1][c] = ty * r1[c], v[2][c] = -r3[c];
+                    if (held) {  // to the hand, as above: each axis a mix of the three, and its place
+                        float h[3][4];
+                        for (int j = 0; j < 3; j++)
+                            for (int c = 0; c < 4; c++)
+                                h[j][c] = hw[j] * v[0][c] + hw[4 + j] * v[1][c] + hw[8 + j] * v[2][c] + (c == 3 ? hw[12 + j] : 0);
+                        std::memcpy(v, h, sizeof(v));
+                    }
                     for (int i = 0; i < 3; i++)
                         for (int c = 0; c < 4; c++) t[i][c] = turn[i] * v[0][c] + turn[3 + i] * v[1][c] + turn[6 + i] * v[2][c];
                     t[0][3] -= shift[0], t[1][3] -= shift[1], t[2][3] -= shift[2];

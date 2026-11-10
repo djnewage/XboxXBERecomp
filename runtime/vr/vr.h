@@ -29,6 +29,10 @@ bool Eye(int eye, float turn[9], float& offset);
 // the same for the scene: shift is how far the eye stands from the title's camera in the head's axes, the head's own
 // movement from the middle included (leaning, ducking), in the title's units
 bool EyeShift(int eye, float turn[9], float shift[3]);
+// what the title draws as held (gpu::State::held) goes to the aiming hand: rot turns it from the camera's axes to the
+// hand's (its roll), by rows; at is where the hand is from the camera, in the camera's axes and the title's units.
+// False when no hand aims the frame.
+bool Held(float rot[9], float at[3]);
 bool Fov(float& tan_x, float& tan_y);  // the tangents of the half angles the frames are drawn at, once known
 
 // --- the title's thread ---

@@ -230,6 +230,9 @@ void Load() {
     s.vr = t["vr"].value_or(s.vr);
     s.vr_hand_aim = t["vr_hand_aim"].value_or(s.vr_hand_aim);
     s.vr_snap_turn = std::min<uint32_t>(t["vr_snap_turn"].value_or(s.vr_snap_turn), 90);
+    s.vr_gun[0] = float(t["vr_gun_x"].value_or(double(s.vr_gun[0])));
+    s.vr_gun[1] = float(t["vr_gun_y"].value_or(double(s.vr_gun[1])));
+    s.vr_gun[2] = float(t["vr_gun_z"].value_or(double(s.vr_gun[2])));
     s.vr_hud_distance = std::clamp<uint32_t>(t["vr_hud_distance"].value_or(s.vr_hud_distance), 100, 1000);
     s.vr_units = std::clamp<uint32_t>(t["vr_units"].value_or(s.vr_units), 1, 1000);
     s.sharpen = std::min<uint32_t>(t["sharpen"].value_or(s.sharpen), 100);
@@ -329,6 +332,9 @@ toml::table Table() {
                   {"vr", s.vr},
                   {"vr_hand_aim", s.vr_hand_aim},
                   {"vr_snap_turn", int64_t(s.vr_snap_turn)},
+                  {"vr_gun_x", double(s.vr_gun[0])},
+                  {"vr_gun_y", double(s.vr_gun[1])},
+                  {"vr_gun_z", double(s.vr_gun[2])},
                   {"vr_hud_distance", int64_t(s.vr_hud_distance)},
                   {"vr_units", int64_t(s.vr_units)},
                   {"sharpen", int64_t(s.sharpen)},

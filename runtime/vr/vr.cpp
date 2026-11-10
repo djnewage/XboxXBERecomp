@@ -87,6 +87,9 @@ struct Pose {
     bool world = false;  // a view of the world, else a picture for the screen
     float yaw = 0, pitch = 0;  // radians: the angles the title drew it at (level), the head's or the aiming hand's
     XrQuaternionf head{0, 0, 0, 1};  // where the head looked then: the picture is turned to it by the renderer
+    bool hand = false;               // the aiming hand gave the angles: where it was and how it was turned
+    XrQuaternionf hand_q{0, 0, 0, 1};
+    XrVector3f hand_at{0, 0, 0};
     XrVector3f position{0, 0, 0};
 };
 
@@ -99,6 +102,8 @@ Pose g_head;
 XrVector3f g_origin{0, 0, 0};  // where the head is when the player stands at the title's camera (recentred: both sticks in)
 float g_screen_yaw = 0;        // the way the screen for menus and movies faces from there
 std::atomic<float> g_turn_pending{0};  // degrees of step turning the title has not taken yet, left positive
+XrQuaternionf g_hand_q{0, 0, 0, 1};
+XrVector3f g_hand_at{0, 0, 0};
 bool g_hand_valid = false;  // the right hand's aim is tracked
 float g_hand_yaw = 0, g_hand_pitch = 0;
 // What each of the title's frames is drawn with, by its number (the count of presents before it): the title writes its
@@ -307,6 +312,7 @@ void ReadControls() {
     if (aimed && !g_hand_valid) LOGR("vr: the right hand aims");
     g_hand_valid = aimed;
     if (aimed) Angles(aim.pose.orientation, g_hand_yaw, g_hand_pitch);
+    if (aimed) g_hand_q = aim.pose.orientation, g_hand_at = aim.pose.position;
     // Walking goes where the head faces. The title walks along its camera, which is the aiming hand's when that aims: the
     // stick is turned by the angle between them. Its sticks (this renderer's titles so far, as Agent Under Fire's first
     // setup): the left one forward and back and turning, the right one's x stepping aside.
@@ -602,7 +608,10 @@ bool Head(float& yaw, float& pitch) {
     if (!g_running || !g_head_valid) return false;
     Pose pose = g_head;
     // the gun in the right hand aims, when it is tracked: the title turns to it, the picture stays with the head
-    if (app::Get().vr_hand_aim && g_hand_valid) pose.yaw = g_hand_yaw, pose.pitch = g_hand_pitch;
+    if (app::Get().vr_hand_aim && g_hand_valid) {
+        pose.yaw = g_hand_yaw, pose.pitch = g_hand_pitch;
+        pose.hand = true, pose.hand_q = g_hand_q, pose.hand_at = g_hand_at;
+    }
     g_frames[g_title_frame % kFrames] = pose;
     g_title_at = GetTickCount64();
     yaw = pose.yaw * 180 / kPi;
@@ -688,6 +697,32 @@ bool EyeShift(int eye, float turn[9], float shift[3]) {
     // seen from the head's own axes, and the eye to one side there
     for (int i = 0; i < 3; i++) shift[i] = turn[i] * t[0] + turn[3 + i] * t[1] + turn[6 + i] * t[2];
     shift[0] += EyeOffset(eye);
+    return true;
+}
+
+bool Held(float rot[9], float at[3]) {
+    Pose pose;
+    XrVector3f origin;
+    {
+        std::lock_guard lock(g_lock);
+        pose = g_frames[g_render_frame % kFrames];
+        origin = g_origin;
+    }
+    if (!g_running || !pose.world || !pose.hand) return false;
+    const XrQuaternionf level = Level(pose.yaw, pose.pitch);
+    {
+        const XrQuaternionf q = Mul(Conj(level), pose.hand_q);
+        const float x = q.x, y = q.y, z = q.z, w = q.w;
+        rot[0] = 1 - 2 * (y * y + z * z), rot[1] = 2 * (x * y - z * w), rot[2] = 2 * (x * z + y * w);
+        rot[3] = 2 * (x * y + z * w), rot[4] = 1 - 2 * (x * x + z * z), rot[5] = 2 * (y * z - x * w);
+        rot[6] = 2 * (x * z - y * w), rot[7] = 2 * (y * z + x * w), rot[8] = 1 - 2 * (x * x + y * y);
+    }
+    const float x = level.x, y = level.y, z = level.z, w = level.w;
+    const float g[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+                        2 * (y * z - x * w),     2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)};
+    const float d[3] = {pose.hand_at.x - origin.x, pose.hand_at.y - origin.y, pose.hand_at.z - origin.z};
+    const float units = float(app::Get().vr_units);
+    for (int i = 0; i < 3; i++) at[i] = (g[i] * d[0] + g[3 + i] * d[1] + g[6 + i] * d[2]) * units;
     return true;
 }
 

@@ -205,6 +205,9 @@ struct State {
     // draw moved by squeeze_shift guest pixels (a left panel left, a right one right, set per element) as it is
     // squeezed, its shape kept; no corner is kept on the frame's edges meanwhile (a letter's edge may fall on one)
     bool squeeze_beyond = false;
+    // a headset: a game hook says what is being drawn is held in the aiming hand (a first person weapon, drawn where the
+    // title's camera has it): the renderer draws it at the hand (vr::Held)
+    bool held = false;
     // a game hook turns the draws whose stage 0 texture has this format (D3DFORMAT, the header's format byte; 0 none)
     // into a black clear of the target: EoN's menu movie (YUY2) behind the title art, which the console never shows; on
     // ultrawide it showed at the sides, or a stale picture did without it (the title clears nothing)
