@@ -986,7 +986,20 @@ void Frame(gpu::Context& ctx, int eye, ID3D12Resource* frame, int format, uint32
                 LOGR("vr: the scene's field of view %.1f by %.1f degrees", 2 * std::atan(g_tan_x) * 180 / kPi, 2 * std::atan(g_tan_y) * 180 / kPi);
             }
         }
-        g_had_3d = most != nullptr;
+        // A frame with nothing of the world in it (a fade, a flash, leaving a scope) is not the end of the view: only
+        // some forty of them on end are (a title that means the screen says so itself, Flat). One such frame sent the
+        // picture to the screen for a quarter of a second, now and then.
+        {
+            static int without = 0;
+            if (most) {
+                if (without > 0 && without <= 45) LOGR("vr: %d frames with nothing of the world drawn: the view kept", without);
+                without = 0;
+                g_had_3d = true;
+            } else if (++without > 45) {
+                if (without == 46 && g_had_3d) LOGR("vr: nothing of the world drawn for 45 frames: the screen");
+                g_had_3d = false;
+            }
+        }
         // A program's rows are the camera's right, up and (w) forward in the world. The world's up is the axis the camera's
         // up lies along most; with it, the level frame of the same heading, seen from the camera's axes (x right, y up, z
         // towards the viewer): y is the world's up, z what is left of the camera's own z, x across them.
