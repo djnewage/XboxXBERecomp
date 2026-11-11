@@ -82,6 +82,12 @@ void View(const float level[9], bool own_yaw, float yaw);
 bool SeenAxes(float axes[9]);
 uint64_t Ticks();  // milliseconds, for a title's own pacing of what it asks
 void Hold();
+// The frame is a picture through a scope: drawn as the title draws it (its own zoom, its mask over it) and shown on a
+// small screen that stays before the eyes. After Head, whose angles still steer.
+void Scope();
+// this program shows nothing in a headset whatever the setting (a launcher that only hands over to the game: a session
+// of its own is one more program starting and leaving in the headset). Before the device is made.
+void Off();
 void Flat();            // the frames from here are not such a view (a menu, a cut scene): shown on the screen
 // the hand controllers as controller 1's inputs, 0 to 1 each in input::Control order; false with none in the hands
 bool Controls(float* v);

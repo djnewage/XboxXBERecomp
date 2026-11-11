@@ -87,6 +87,7 @@ PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr = nullptr;
 // what the title drew a frame with
 struct Pose {
     bool world = false;  // a view of the world, else a picture for the screen
+    bool scope = false;  // that picture is a scope's: on a small screen before the eyes (vr::Scope)
     float yaw = 0, pitch = 0;  // radians: the angles the title drew it at (level), the head's or the aiming hand's
     XrQuaternionf head{0, 0, 0, 1};  // where the head looked then: the picture is turned to it by the renderer
     bool hand = false;               // the aiming hand gave the angles: where it was and how it was turned
@@ -99,7 +100,7 @@ struct Pose {
     uint64_t at = 0;  // when the head was read for it (GetTickCount64), for the log
 };
 
-std::atomic<bool> g_failed{false}, g_running{false};
+std::atomic<bool> g_failed{false}, g_running{false}, g_off{false};
 std::atomic<float> g_units{0};   // a title's own units a metre (SetUnits), 0 the setting's
 std::atomic<int> g_layout{0};    // how the hand controllers' sticks play (Layout)
 
@@ -685,7 +686,8 @@ void LocateHead() {
 }
 }  // namespace
 
-bool Enabled() { return app::Get().vr && !g_failed; }
+bool Enabled() { return app::Get().vr && !g_failed && !g_off; }
+void Off() { g_off = true; }
 bool Running() { return g_running; }
 float Units() { return g_units > 0 ? g_units.load() : float(app::Get().vr_units); }
 void SetUnits(float units) { g_units = units; }
@@ -802,6 +804,14 @@ void NoteProgram(float tan_x, float tan_y, uint32_t count, const float* m) {
 void Flat() {
     std::lock_guard lock(g_lock);
     g_frames[g_title_frame % kFrames] = {};
+}
+void Scope() {
+    std::lock_guard lock(g_lock);
+    if (!g_running) return;
+    Pose pose;
+    pose.scope = true;
+    g_frames[g_title_frame % kFrames] = pose;
+    g_title_at = GetTickCount64();
 }
 
 uint32_t TitleFrame() {
@@ -1200,6 +1210,14 @@ void Submit() {
             screen.pose.orientation = Level(yaw, 0);
             screen.pose.position = {at.x - kScreenDistance * std::sin(yaw), at.y, at.z - kScreenDistance * std::cos(yaw)};
             screen.size = {kScreenWidth, kScreenWidth / aspect};
+            if (g_shown.scope && !g_shown.world && g_view != XR_NULL_HANDLE) {
+                // a scope's picture: before the eyes wherever they look, some sixty degrees wide
+                constexpr float kScopeDistance = 1.2f, kScopeWidth = 1.4f;
+                screen.space = g_view;
+                screen.pose.orientation = {0, 0, 0, 1};
+                screen.pose.position = {0, 0, -kScopeDistance};
+                screen.size = {kScopeWidth, kScopeWidth / aspect};
+            }
             layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&screen);
         }
     }
